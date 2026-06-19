@@ -1,201 +1,102 @@
 ---
-name: document-structuring
+name: document_structuring
 description: >-
-  Slices PDF and Word (docx) files into structured Markdown segments, stores
-  them in an SQLite database, and supports document listing, TOC viewing,
-  full-text searching, chunk retrieval, and document deletion.
-  Optimised with batch PDF parsing (~16% faster than page-by-page).
+  Parses long PDF and Word (.docx) manuals into structured Markdown chunks,
+  indexes them in a local SQLite database, and supports document listing,
+  TOC viewing, full-text search, chunk retrieval, and deletion. Optimised
+  with batch PDF parsing (~16% faster than page-by-page). Use this skill
+  whenever the user uploads or references a large PDF/Word document —
+  especially 100+ page technical manuals, BIOS/PPR specs, register
+  references, or other reference documents — and wants to search, look up,
+  summarize, or browse specific sections without loading the entire file
+  into context. Also use it when the user asks for a table of contents,
+  wants to list or manage previously parsed documents, or needs to delete
+  an indexed document, even if they don't explicitly say "parse," "chunk,"
+  or "SQLite." Do not read or extract text from large PDFs/DOCX files
+  directly with custom scripts — always route through this skill instead.
+compatibility: Requires Python 3.10+ with PyMuPDF, pymupdf4llm, and python-docx installed.
 ---
 
-# 📄 Document Structuring & Management
+# Document Structuring & Management Specialist
+
+This skill provides instructions for parsing long PDF/DOCX manuals, chunking them into structured Markdown sections, indexing them in a local SQLite database, and retrieving them on demand — keeping large technical documents searchable and inspectable without overwhelming the LLM's context window.
+
+## Prerequisites
+
+**Before running any of the CLI commands below, verify that the required Python packages are installed in the active environment by executing `python -c "import pymupdf4llm; print('OK')"`. If it fails, install them via:**
+```bash
+pip install PyMuPDF pymupdf4llm python-docx
+```
+
+1. **Python Environment**: Ensure Python 3.10+ is available.
+2. **Dependencies**: The following packages must be installed:
+   - `PyMuPDF` (for layout analysis and PDF extraction)
+   - `pymupdf4llm` (for converting PDF contents to Markdown)
+   - `python-docx` (for parsing Word documents)
 
 ## Overview
 
-This skill allows the agent to parse PDF and Word (.docx) documents, divide them into structured Markdown sections based on document headings, store the sections in a local SQLite database, and perform index lookups, keyword searching, section rendering, and record cleanup.
+Large files are converted into individual Markdown chunks (typically 1–5 KB) corresponding to document heading levels. This provides up to **150–800× token compression** vs. reading the raw document.
 
-**Best for**: Large technical manuals (2,000+ page PDFs like BIOS/PPR specs). Each parsed chunk is ~1–5 KB of Markdown — you get **150–800× token compression** vs feeding the raw PDF to an LLM.
-
-All database records and outputs resolve relative to the project workspace root:
-- SQLite Database: `documents.db`
-- Physical Markdown Files: `output/<document_id>/chunks/`
-
-## Changelog
-
-| Version | Date | Changes |
-| ------- | -------- | ------- |
-| **v2.0** | 2026-06-18 | Patch v2 — batch PDF parsing (50-page chunks), crash-safe DB commit order, actual rowid lookup, duplicate document guard, TOC list-of-dict collision fix, SectionNumberTracker read-only fix |
-| **v1.1** | 2026-06-17 | Mod branch — page tracking via `doc.get_toc()`, SectionNumberTracker reset fix |
-| **v1.0** | 2026-06-04 | Original release — page-by-page parsing, basic FTS5 search |
-
-### v2.0 Patch Summary
-
-| Bug Fixed | Severity | Fix | Verified ✅ |
-| --------- | -------- | --- | ---------- |
-| **Orphaned files on crash** | 🔴 Critical | `conn.commit()` moved BEFORE file I/O — crash during write leaves clean DB, no orphaned `.md` files | Crash safety test passed |
-| **Predicted ID mismatch** | 🔴 Critical | Replaced `sqlite_sequence` prediction with post-INSERT `SELECT id FROM chunks WHERE document_id = ? ORDER BY id ASC` for actual rowids | 9,834/9,834 correct ✅ |
-| **Duplicate document parse** | 🟡 Medium | Added filename dedup guard: if re-parsing same file, auto-deletes old rows + physical files before fresh parse | Tested on 17 MB PDF |
-| **TOC json-key collision** | 🟡 Medium | toc.json now serialises as **list-of-dict** instead of keyed dict — duplicate section numbers no longer silently overwrite entries | Verified via dump inspection |
-| **Batch PDF parsing** (page-by-page → batch) | ⚪ Perf | `pymupdf4llm.to_markdown()` called with 50-page chunks → single layout analysis per batch. Page resolution via internal TOC (`doc.get_toc()`) mapping | **17m23s → 14m41s** (16% faster on 2,400 page PDF) |
-| **SectionNumberTracker mutate-in-generate** | ⚪ Correctness | `val == 0` write-back changed to `max(self.current_nums[i], 1)` — read-only string construction, parent-level state no longer polluted | Code review passed |
-
-### Performance Benchmarks
-
-Test system: Windows 10, AMD Ryzen + dual NVIDIA GPU (qwen3.6:27B on Ollama). Python 3.11. Test file: `57896-B1_3.04.pdf` (17 MB, ~2,400 pages, AMD Family 1Ah PPR spec).
-
-| Metric | Page-by-page (v1) | Batch v2.0 | Improvement |
-| ------ | ----------------- | -------- | ----------- |
-| Parse time | 17m 23.8s (1,044 s) | **14m 40.9s** (881 s) | ⬇️ **~16% faster** |
-| Chunks generated | 9,834 | 9,834 | ✅ Same output |
-| DB↔Disk consistency | — | **18/18 chunks matched** (MD5 hash verified) | ✅ Verified |
-| File path accuracy | Predicted IDs ❌ | Actual rowids ✅ | ✅ Fixed |
-
-## Architecture
-
-```
-┌──────────────────────────────┐
-│         Input Document       │  PDF / DOCX
-│   (e.g., 2400-page PPR)     │
-└───────────┬──────────────────┘
-            │
-            ▼
-┌──────────────────────────────┐
-│    parse_document.py         │
-│  • Batch PDF (50 pages)      │  pymupdf4llm.to_markdown(pages=range)
-│  • TOC-based page resolution │  doc.get_toc() → heading→page map
-│  • SectionNumberTracker      │  read-only generate(), no state pollution
-└───────────┬──────────────────┘
-            │
-            ▼  chunks[] (list-of-dict)
-┌──────────────────────────────┐
-│       database.py           │
-│                             │
-│  Phase 1: DB INSERT + COMMIT│  ← Crash safety: commit BEFORE disk IO
-│  • documents row            │
-│  • chunks rows (placeholder)│
-│  • GET actual rowids        │  SELECT ... ORDER BY id ASC
-│                             │
-│  Phase 2: Disk file writes   │  <--- After DB is safe!
-│  • Physical .md per chunk    │
-│  • UPDATE file_path with     │    actual physical path
-│  • toc.json (list format)   │
-│  • index.md                 │
-└───────────┬──────────────────┘
-            │
-            ▼
-┌──────────────────────────────┐
-│       documents.db           │  SQLite with FTS5 index
-│                             │
-│  ┌─────────────┐  ┌───────┐ │
-│  │ documents   │1 │chunks │N│
-│  │ ├ filename   │→ │ ├ ID  │ │
-│  │ ├ chunk_ctn  │  │ ├ sec │ │
-│  │ └ status     │  │ ├ cnt │ │
-│  └─────────────┘  │ └ page│ │
-│                   └───────┘ │
-│   chunks_fts (FTS5)        │  Full-text search index
-└──────────────────────────────┘
-            │
-            ▼
-┌──────────────────────────────┐
-│   output/<document_id>/      │
-│   ├ toc.json                 │    List-of-dict entries
-│   ├ index.md                 │    Markdown directory tree
-│   └ chunks/                  │    Physical .md files
-│       1_0_Introduction.md   │
-│       2_1_Overview.md      │
-│       ... (9,834 files)    │
-└──────────────────────────────┘
-```
-
-## Quick Start
-
-You can run the utility script `document_tool.py` directly using Python. For all commands (except `delete`), you must provide a `--output` path to write the JSON results.
-
-> [!NOTE]
-> In the examples below, `[path_to_skill]` represents the directory where this skill is installed.
-> - For **local workspace-scoped** installations, the path is `.agents/skills/document_structuring/`.
-> - For **global user-scoped** installations, the path is `~/.hermes/skills/document_structuring/` or `~/.gemini/config/skills/document_structuring/`.
-
-### 1. Parse a File
-
-```bash
-python [path_to_skill]/scripts/document_tool.py parse --file "57896-B1_3.04.pdf" --output "parse_summary.json"
-```
-
-> 💡 **Tip**: For large PDFs (2,000+ pages), run in background:
-> ```bash
-> nohup python [path_to_skill]/scripts/document_tool.py parse --file "large-manual.pdf" --output "summary.json" > parse.log 2>&1 &
-> ```
-
-### 2. List Parsed Documents
-
-```bash
-python [path_to_skill]/scripts/document_tool.py list --output "documents_list.json"
-```
-
-> 🔁 **Re-parse handling**: If you run `parse` on a document that already has the same filename, it automatically deletes the old chunks before re-inserting — no manual cleanup needed.
-
-### 3. Retrieve a Document's Table of Contents (TOC)
-
-```bash
-python [path_to_skill]/scripts/document_tool.py toc --doc-id 1 --output "toc_data.json"
-```
-
-### 4. Search across Chunks
-
-```bash
-python [path_to_skill]/scripts/document_tool.py search --query "ACPI" --output "search_results.json"
-```
-
-> 🔍 **Query syntax**: Multiple terms are combined with AND operators. For OR queries, use SQLite FTS5 boolean: `"term1 OR term2"`. If FTS5 matching fails, the system automatically falls back to `LIKE`-based substring search.
-
-### 5. Retrieve a Specific Chunk's Content
-
-```bash
-python [path_to_skill]/scripts/document_tool.py get-chunk --chunk-id 5198 --output "chunk_content.json"
-```
-
-> ✅ **DB↔Disk consistency**: Retrieved content always matches the physical `.md` file at the same path. Verified via MD5 hash across 100% of chunks in testing.
-
-### 6. Delete a Document (Cascading delete from DB and Disk)
-
-```bash
-python [path_to_skill]/scripts/document_tool.py delete --doc-id 1
-```
+### Data Layout
+All file pathways are relative to the project workspace root:
+- **SQLite Database**: `documents.db` (contains metadata, chunk definitions, and the FTS5 search index)
+- **Chunk Directory**: `output/<document_id>/chunks/` (contains physical `.md` files for each parsed segment)
+- **TOC & Index**: `output/<document_id>/toc.json` (list of headings) and `output/<document_id>/index.md` (Markdown directory tree)
 
 ---
 
-## Utility Scripts
+## Core Rules
 
-The CLI helper script resides at `[path_to_skill]/scripts/document_tool.py`. Here are the subcommands and their specifications:
+- **Workspace Root Constraint**: Always run the CLI commands from the **project workspace root** (where `documents.db` and the `output/` directory are managed). Never run them from inside the `scripts/` directory.
+- **Path Formatting (Windows/MSYS)**: Always use forward slashes `/`, never backslashes `\`, for all file paths passed as arguments to guarantee compatibility with Python scripts and MSYS bash terminal. (e.g., use `C:/Users/Barnet/doc.pdf`).
+- **Required Output Parameter**: Except for the `delete` command, you must always provide the `--output <path.json>` flag. The CLI writes JSON-formatted results to the specified file.
+- **No Direct File Reading of Raw PDFs**: Never attempt to parse or extract text from large raw PDFs directly using Python scripts or custom PDF parsers; always use the `document_tool.py` wrapper.
+- **Re-parsing Safety**: Re-parsing a file with the same name automatically removes the old database entries and physical folder structure first. There is no need for manual deletion before re-importing.
+- **Consistency Guarantee**: Physical Markdown files on disk and the SQLite database are kept in sync. DB records are committed *before* writing files, ensuring no orphaned file handles or mismatched indexes if the script is interrupted.
+
+---
+
+## Use Cases
+
+- **Large Spec/Manual Analysis**: Slicing BIOS/PPR/registers manuals (2,000+ pages) for granular reading.
+- **Context Preservation**: Retrieving only relevant document sub-sections (e.g., register details, ACPI states) to keep the LLM context clean.
+- **Full-Text Spec Searching**: Locating specific configuration keys or registers across document structures.
+- **TOC Inspection**: Verifying the document organization structure.
+
+---
+
+## Available CLI Subcommands
+
+The CLI helper script is located at `scripts/document_tool.py`.
 
 ### `parse`
-- **Description**: Parses a PDF/DOCX file, chunks it into Markdown sections, and logs the document metadata and chunks into SQLite and disk.
-- **Parameters**:
-  - `--file` (required): Path to the input PDF or DOCX document.
-  - `--output` (required): Path to write the JSON operation summary.
-- **JSON Output Format**:
+- **Description**: Parses a PDF or DOCX file, chunks it into Markdown sections, and logs the metadata and chunks into SQLite and disk.
+- **Arguments**:
+  - `--file <path>` (required): Path to the input PDF or DOCX document.
+  - `--output <path.json>` (required): Path to write the JSON operation summary.
+- **Output JSON Format**:
   ```json
   {
     "success": true,
     "document_id": 1,
-    "filename": "57896-B1_3.04.pdf",
+    "filename": "your-manual.pdf",
     "chunk_count": 9834
   }
   ```
 
 ### `list`
 - **Description**: Lists all structured documents tracked in the SQLite database.
-- **Parameters**:
-  - `--output` (required): Path to write the JSON output file.
-- **JSON Output Format**:
+- **Arguments**:
+  - `--output <path.json>` (required): Path to write the JSON output file.
+- **Output JSON Format**:
   ```json
   {
     "documents": [
       {
         "id": 1,
-        "filename": "57896-B1_3.04.pdf",
-        "upload_time": "2026-06-04 10:37:50",
+        "filename": "your-manual.pdf",
+        "upload_time": "2026-06-19 07:44:28",
         "chunk_count": 9834,
         "status": "success"
       }
@@ -205,19 +106,26 @@ The CLI helper script resides at `[path_to_skill]/scripts/document_tool.py`. Her
 
 ### `toc`
 - **Description**: Returns all headings/chunks of a document, sorted by section numbers.
-- **Parameters**:
-  - `--doc-id` (required): Document ID.
-  - `--output` (required): Path to write the JSON output file.
-- **JSON Output Format**:
+- **Arguments**:
+  - `--doc-id <id>` (required): The document ID.
+  - `--output <path.json>` (required): Path to write the JSON output file.
+- **Output JSON Format**:
   ```json
   {
     "toc": [
       {
-        "id": 123,
-        "section_number": "1.1",
+        "id": 1,
+        "section_number": "1",
         "title": "Introduction",
-        "page_start": 3,
-        "file_path": "output/1/chunks/123_1.1_Introduction.md"
+        "page_start": 1,
+        "file_path": "output/1/chunks/1_1_Introduction.md"
+      },
+      {
+        "id": 2,
+        "section_number": "1.1",
+        "title": "Background",
+        "page_start": 2,
+        "file_path": "output/1/chunks/2_1.1_Background.md"
       }
     ]
   }
@@ -225,23 +133,23 @@ The CLI helper script resides at `[path_to_skill]/scripts/document_tool.py`. Her
 
 ### `search`
 - **Description**: Performs a keyword lookup against the chunk titles and text content in the database using SQLite FTS5 index.
-- **Parameters**:
-  - `--query` (required): The keyword query string. Multiple terms are combined automatically with AND operators.
-  - `--doc-id` (optional): Filter results to this specific document ID.
-  - `--output` (required): Path to write the JSON search results.
-- **JSON Output Format**:
+- **Arguments**:
+  - `--query <string>` (required): The keyword query string. Multiple terms are combined automatically with AND operators. For OR queries, use SQLite FTS5 syntax (e.g. `"term1 OR term2"`).
+  - `--doc-id <id>` (optional): Filter results to a specific document.
+  - `--output <path.json>` (required): Path to write the JSON search results.
+- **Output JSON Format**:
   ```json
   {
     "results": [
       {
         "id": 123,
         "document_id": 1,
-        "document_name": "57896-B1_3.04.pdf",
-        "section_number": "1.1",
-        "title": "Introduction",
-        "page_start": 3,
-        "file_path": "output/1/chunks/123_1.1_Introduction.md",
-        "snippet": "This is a snippet of text matching your query..."
+        "section_number": "3.2",
+        "title": "ACPI States",
+        "page_start": 45,
+        "file_path": "output/1/chunks/123_3.2_ACPI_States.md",
+        "document_name": "your-manual.pdf",
+        "snippet": "This section explains ==ACPI== states and sleep modes..."
       }
     ]
   }
@@ -249,61 +157,76 @@ The CLI helper script resides at `[path_to_skill]/scripts/document_tool.py`. Her
 
 ### `get-chunk`
 - **Description**: Retrieves full metadata and markdown text content of a single chunk.
-- **Parameters**:
-  - `--chunk-id` (required): Database ID of the target chunk.
-  - `--output` (required): Path to write the JSON chunk content.
-- **JSON Output Format**:
+- **Arguments**:
+  - `--chunk-id <id>` (required): Database ID of the target chunk.
+  - `--output <path.json>` (required): Path to write the JSON chunk content.
+- **Output JSON Format**:
   ```json
   {
     "chunk": {
       "id": 123,
       "document_id": 1,
-      "document_name": "57896-B1_3.04.pdf",
-      "section_number": "1.1",
-      "title": "Introduction",
+      "section_number": "3.2",
+      "title": "ACPI States",
       "content": "Full markdown content of this section...",
-      "page_start": 3,
-      "file_path": "output/1/chunks/123_1.1_Introduction.md"
+      "page_start": 45,
+      "file_path": "output/1/chunks/123_3.2_ACPI_States.md",
+      "document_name": "your-manual.pdf"
     }
   }
   ```
 
 ### `delete`
-- **Description**: Deletes the document from the database (along with cascading chunks) and deletes the physical files under `output/<doc_id>/` from disk.
-- **Parameters**:
-  - `--doc-id` (required): Database ID of the document to delete.
+- **Description**: Deletes the document from the database (cascading chunks) and deletes the physical files under `output/<doc_id>/` from disk.
+- **Arguments**:
+  - `--doc-id <id>` (required): Database ID of the document to delete.
 - **Stdout Output Format**:
-  `Success: Document '57896-B1_3.04.pdf' (ID: 1) and all its associated chunks have been deleted.`
+  `Success: Document 'your-manual.pdf' (ID: 1) and all its associated chunks have been deleted.`
 
 ---
 
-## Token Economics — Why This Matters
+## Workflows
 
-The primary value of this skill is **token compression for LLM context windows**:
+### 1. Document Ingestion / Parsing Workflow
+Follow this checklist to import a new document:
+- [ ] **Step 0**: Quickly check dependencies by running `python -c "import pymupdf4llm; print('OK')"`. If it throws an error, install them using pip before proceeding.
+- [ ] **Step 1**: Verify the document file extension is `.pdf` or `.docx`.
+- [ ] **Step 2**: Run `list` to check if a document with the same filename already exists.
+- [ ] **Step 3**: Execute the `parse` command from the workspace root. (Make sure to use forward slashes for paths).
+  *Note: Large PDFs (2,000+ pages) may take several minutes to parse. Do not interrupt execution.*
+- [ ] **Step 4**: Verify the result JSON contains `"success": true` and note the `document_id`.
 
-| Scenario | Raw PDF tokens | Via chunk retrieval | Compression ratio |
-| -------- | -------------- | ------------------ | ----------------- |
-| Full 2,400-page PPR | ~4.5M tokens | FTS5 search → top 5 hits → ~2.5K tokens | **~1,800×** |
-| Chapter query (e.g. "MSR registers") | ~150K tokens (whole chapter) | get-chunk → ~3K tokens per section | **~50×** |
-| Specific register lookup | Full PDF needed otherwise | Targeted chunk → ~1.2K tokens | **~3,750×** |
+### 2. Document Search & Retrieval Workflow
+Follow this checklist to lookup information in indexed documents:
+- [ ] **Step 1**: Formulate your keyword query. Use boolean operators if needed (e.g., `ACPI AND C-States`).
+- [ ] **Step 2**: Execute the `search` command, outputting to a temporary JSON file.
+- [ ] **Step 3**: Examine the matched snippets and retrieve the most relevant `chunk_id`s.
+- [ ] **Step 4**: Execute the `get-chunk` command for each desired `chunk_id` to retrieve the full Markdown content.
+- [ ] **Step 5**: If context is missing, use `toc` to view surrounding sections, and retrieve adjacent `chunk_id`s.
 
-For a 128K context window local model (e.g., qwen3.6:27B), this means you can reason about specific sections of a 2,400-page technical spec without filling the entire context — freeing up tokens for actual analysis and reasoning.
+### 3. Document Deletion Workflow
+Follow this checklist to clean up documents:
+- [ ] **Step 1**: Find the `document_id` by running `list`.
+- [ ] **Step 2**: Execute `delete` using the targeted `--doc-id`.
+- [ ] **Step 3**: Verify stdout success message and ensure `output/<document_id>/` folder has been removed from disk.
 
 ---
 
-## Common Mistakes
+## Token Economics — Reference
+Keep these approximate token metrics in mind:
+- **Full 2,400-page spec**: ~4.5M tokens (too large/expensive for standard contexts).
+- **Targeted Search Retrieval (Top 5 Chunks)**: ~2.5K tokens (**~1,800× compression**).
+- **Targeted Chapter/Section Retrieval**: ~3K tokens (**~50× compression**).
 
-1. **Missing `--output` Parameter**:
-   Except for `delete`, all commands require a `--output` parameter. If omitted, the CLI will output an error. Always specify a JSON file path for results.
+---
 
-2. **Unsupported Formats**:
-   The `parse` command only accepts files ending with `.pdf` or `.docx`. Ensure the file extension is correct before running the parser.
+## Common Mistakes & Troubleshooting
 
-3. **CWD Dependency**:
-   Ensure you run the commands from the project workspace root so that references to the SQLite database (`documents.db`) and the physical output files (`output/`) remain consistent.
-
-4. **Re-parsing Overhead**:
-   If you `parse` a document with an already-indexed filename, the system automatically deletes old chunks and re-inserts. For documents >500 pages this takes as long as the original parse — avoid accidental double-parsing.
-
-5. **TOC Key Collision (v2 fix)**:
-   Older versions stored `toc.json` as a dict keyed by section number, silently dropping entries with duplicate keys. v2 stores as a list-of-dict internally — every chunk gets an entry regardless of key overlap.
+- **Forgot `--output` Parameter**:
+  If the CLI fails with a missing output argument, re-run with `--output <some_temp_file.json>`.
+- **CWD Location Error**:
+  If `documents.db` is created in a subdirectory (like `scripts/`), delete the database file, change directory to the workspace root, and run the command again.
+- **Querying Special Characters**:
+  SQLite FTS5 syntax does not support raw special character queries. If a query fails, strip special characters or use a single keyword search to trigger the database's `LIKE` query fallback mechanism.
+- **Incorrect Python Environment**:
+  If modules like `fitz` or `docx` are missing, verify that dependencies are installed and that you are using the correct Python binary/virtual environment.
