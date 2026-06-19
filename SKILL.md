@@ -49,7 +49,7 @@ All file pathways are relative to the project workspace root:
 ## Core Rules
 
 - **Workspace Root Constraint**: Always run the CLI commands from the **project workspace root** (where `documents.db` and the `output/` directory are managed). Never run them from inside the `scripts/` directory.
-- **Path Formatting (Windows/MSYS)**: Always use forward slashes `/`, never backslashes `\`, for all file paths passed as arguments to guarantee compatibility with Python scripts and MSYS bash terminal. (e.g., use `C:/Users/Barnet/doc.pdf`).
+- **Path Formatting (Windows/MSYS)**: Always use forward slashes `/`, never backslashes `\`, for all file paths passed as arguments to guarantee compatibility with Python scripts and MSYS bash terminal.
 - **Required Output Parameter**: Except for the `delete` command, you must always provide the `--output <path.json>` flag. The CLI writes JSON-formatted results to the specified file.
 - **No Direct File Reading of Raw PDFs**: Never attempt to parse or extract text from large raw PDFs directly using Python scripts or custom PDF parsers; always use the `document_tool.py` wrapper.
 - **Re-parsing Safety**: Re-parsing a file with the same name automatically removes the old database entries and physical folder structure first. There is no need for manual deletion before re-importing.
