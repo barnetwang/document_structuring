@@ -23,9 +23,9 @@ This skill provides instructions for parsing long PDF/DOCX manuals, chunking the
 
 ## Prerequisites
 
-**Before running any of the CLI commands below, verify that the required Python packages are installed in the active environment by executing `python -c "import pymupdf4llm; print('OK')"`. If it fails, install them via:**
+**Before running any of the CLI commands below, verify that the package is installed in the active environment. If it is not, install it from the workspace root via:**
 ```bash
-pip install PyMuPDF pymupdf4llm python-docx
+pip install -e .
 ```
 
 1. **Python Environment**: Ensure Python 3.10+ is available.
@@ -51,7 +51,7 @@ All file pathways are relative to the project workspace root:
 - **Workspace Root Constraint**: Always run the CLI commands from the **project workspace root** (where `documents.db` and the `output/` directory are managed). Never run them from inside the `scripts/` directory.
 - **Path Formatting (Windows/MSYS)**: Always use forward slashes `/`, never backslashes `\`, for all file paths passed as arguments to guarantee compatibility with Python scripts and MSYS bash terminal.
 - **Required Output Parameter**: Except for the `delete` command, you must always provide the `--output <path.json>` flag. The CLI writes JSON-formatted results to the specified file.
-- **No Direct File Reading of Raw PDFs**: Never attempt to parse or extract text from large raw PDFs directly using Python scripts or custom PDF parsers; always use the `document_tool.py` wrapper.
+- **No Direct File Reading of Raw PDFs**: Never attempt to parse or extract text from large raw PDFs directly using Python scripts or custom PDF parsers; always use the `doc-structuring` CLI.
 - **Re-parsing Safety**: Re-parsing a file with the same name automatically removes the old database entries and physical folder structure first. There is no need for manual deletion before re-importing.
 - **Consistency Guarantee**: Physical Markdown files on disk and the SQLite database are kept in sync. DB records are committed *before* writing files, ensuring no orphaned file handles or mismatched indexes if the script is interrupted.
 
@@ -68,7 +68,7 @@ All file pathways are relative to the project workspace root:
 
 ## Available CLI Subcommands
 
-The CLI helper script is located at `scripts/document_tool.py`.
+The CLI tool is installed as `doc-structuring`.
 
 ### `parse`
 - **Description**: Parses a PDF or DOCX file, chunks it into Markdown sections, and logs the metadata and chunks into SQLite and disk.
@@ -189,10 +189,10 @@ The CLI helper script is located at `scripts/document_tool.py`.
 
 ### 1. Document Ingestion / Parsing Workflow
 Follow this checklist to import a new document:
-- [ ] **Step 0**: Quickly check dependencies by running `python -c "import pymupdf4llm; print('OK')"`. If it throws an error, install them using pip before proceeding.
+- [ ] **Step 0**: Ensure the package is installed via `pip install -e .`.
 - [ ] **Step 1**: Verify the document file extension is `.pdf` or `.docx`.
-- [ ] **Step 2**: Run `list` to check if a document with the same filename already exists.
-- [ ] **Step 3**: Execute the `parse` command from the workspace root. (Make sure to use forward slashes for paths).
+- [ ] **Step 2**: Run `doc-structuring list` to check if a document with the same filename already exists.
+- [ ] **Step 3**: Execute the `doc-structuring parse` command from the workspace root. (Make sure to use forward slashes for paths).
   *Note: Large PDFs (2,000+ pages) may take several minutes to parse. Do not interrupt execution.*
 - [ ] **Step 4**: Verify the result JSON contains `"success": true` and note the `document_id`.
 
