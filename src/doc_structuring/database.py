@@ -7,6 +7,7 @@ import logging
 import re
 import shutil
 import sqlite3
+import os
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +18,7 @@ from .utils import sanitize_filename, section_sort_key
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +164,16 @@ def init_db(config: AppConfig | None = None) -> None:
             );
         """)
 
+        # Create document_tags table (if first run or upgrade to v3)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS document_tags (
+                document_id INTEGER NOT NULL,
+                tag TEXT NOT NULL,
+                PRIMARY KEY (document_id, tag),
+                FOREIGN KEY (document_id) REFERENCES documents (id) ON DELETE CASCADE
+            );
+        """)
+
         # -----------------------------------------------------------------
         # FTS5 Virtual Table & Triggers
         # -----------------------------------------------------------------
@@ -233,6 +244,7 @@ def save_document(
     filename: str,
     chunks: list[dict],
     config: AppConfig | None = None,
+    tags: list[str] | None = None,
 ) -> int:
     """Save document metadata and chunks, then write physical Markdown files.
 
@@ -305,6 +317,14 @@ def save_document(
             # Commit DB NOW before any file I/O (crash safety)
             conn.commit()
 
+            # Save tags if provided
+            if tags:
+                cursor.executemany(
+                    "INSERT INTO document_tags (document_id, tag) VALUES (?, ?)",
+                    [(document_id, tag.strip()) for tag in tags if tag.strip()]
+                )
+                conn.commit()
+
             # Get ACTUAL rowids via sequential query (not predicted)
             cursor.execute(
                 "SELECT id FROM chunks WHERE document_id = ? ORDER BY id ASC",
@@ -327,8 +347,12 @@ def save_document(
     chunks_dir = doc_dir / config.chunks_subdir
     chunks_dir.mkdir(parents=True, exist_ok=True)
 
+    images_dir = doc_dir / "images"
+
     toc_entries_list: list[dict] = []
     update_pairs: list[tuple[str, int]] = []
+
+    image_pattern = re.compile(r'<!-- IMAGE: (\{.*?\}) -->')
 
     for idx, chunk in enumerate(chunks):
         if idx >= len(actual_ids):
@@ -339,26 +363,82 @@ def save_document(
         clean_title = sanitize_filename(title)
         chunk_filename = f"{chunk_db_id}_{number}_{clean_title}.md"
 
+        chunk_images = []
+        chunk_content = chunk["content"]
+        img_seq = 1
+
+        def replace_image_placeholder(match):
+            nonlocal img_seq
+            meta_json = match.group(1)
+            try:
+                meta = json.loads(meta_json)
+                temp_path = meta.get("temp_path")
+                caption = meta.get("caption", f"Image {img_seq}")
+                contained_text_list = meta.get("contained_text", [])
+
+                if temp_path and os.path.exists(temp_path):
+                    images_dir.mkdir(parents=True, exist_ok=True)
+                    clean_number = sanitize_filename(number)
+                    img_name = f"{chunk_db_id}_{clean_number}_{img_seq}.png"
+                    dest_path = images_dir / img_name
+
+                    shutil.copy(temp_path, dest_path)
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+
+                    rel_img_path = f"images/{img_name}"
+                    chunk_images.append({
+                        "rel_path": rel_img_path,
+                        "abs_path": str(dest_path),
+                        "caption": caption,
+                        "contained_text": contained_text_list
+                    })
+
+                    img_seq += 1
+                    return f"\n![{caption}](../{rel_img_path})\n"
+            except Exception as e:
+                logger.error("Failed to parse image placeholder: %s", e)
+            return match.group(0)
+
+        new_content = image_pattern.sub(replace_image_placeholder, chunk_content)
+
         filepath = chunks_dir / chunk_filename
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(f"# {number} {title}\n\n")
             f.write("metadata:\n")
             f.write(f"- source file: {chunk.get('source', filename)}\n")
             f.write(f"- section number: {number}\n")
-            f.write(f"- page start: {chunk['page_start']}\n\n")
+            f.write(f"- page start: {chunk['page_start']}\n")
+            if chunk_images:
+                f.write("- images:\n")
+                for img in chunk_images:
+                    f.write(f"  - output/{document_id}/{img['rel_path']}\n")
+            f.write("\n")
             f.write("content:\n")
-            f.write(chunk["content"])
+            f.write(new_content)
+            if chunk_images:
+                f.write("\n\n###### 圖表及包含文字 (Diagrams & Contained Text):\n")
+                for img in chunk_images:
+                    f.write(f"- **圖片: {img['caption']}** ({img['rel_path']})\n")
+                    if img["contained_text"]:
+                        words_str = ", ".join([w["text"] for w in img["contained_text"]])
+                        f.write(f"  * 包含文字: {words_str}\n")
 
         update_pairs.append((f"{base_prefix}{chunk_filename}", chunk_db_id))
 
         if number != "0":
-            toc_entries_list.append({
+            entry = {
                 "id": chunk_db_id,
                 "section_number": number,
                 "title": title,
                 "file": chunk_filename,
                 "page_start": chunk["page_start"],
-            })
+            }
+            if chunk_images:
+                entry["images"] = [img["rel_path"] for img in chunk_images]
+            toc_entries_list.append(entry)
 
     # Batch UPDATE all file_path values in one call (N+1 fix)
     with get_db(config.db_path) as conn:
@@ -379,9 +459,21 @@ def save_document(
             "file": entry["file"],
             "title": entry["title"],
             "page_start": entry["page_start"],
+            "images": entry.get("images", []),
         }
 
     generate_document_index_file(doc_dir, toc_dict_for_display)
+
+    # Clean up temp_pdf_tmp directory if it exists
+    temp_pdf_dir = Path("temp_pdf_tmp")
+    if temp_pdf_dir.exists():
+        try:
+            shutil.rmtree(temp_pdf_dir)
+        except Exception:
+            pass
+
+    # Update global catalog
+    generate_global_catalog(config)
 
     return document_id
 
@@ -418,6 +510,7 @@ def generate_document_index_file(
         for k in sorted_keys:
             title = toc[k]['title']
             chunk_filename = toc[k]['file']
+            images = toc[k].get('images', [])
 
             # Remove the _id suffix from the key for clean display
             display_sec = k.rsplit('_', 1)[0]
@@ -426,6 +519,10 @@ def generate_document_index_file(
             indent = "  " * depth
 
             f.write(f"{indent}* [{display_sec} {title}](chunks/{chunk_filename})\n")
+            if images:
+                for img in images:
+                    img_name = img.split('/')[-1]
+                    f.write(f"{indent}  * [🖼️ Image: {img_name}]({img})\n")
 
 
 def list_documents(config: AppConfig | None = None) -> list[dict]:
@@ -622,4 +719,138 @@ def delete_document(
     if doc_dir.exists():
         shutil.rmtree(doc_dir)
 
+    # Update global catalog
+    generate_global_catalog(config)
+
     return filename
+
+
+# ---------------------------------------------------------------------------
+# Document Tags & Global Catalog
+# ---------------------------------------------------------------------------
+def set_document_tags(
+    doc_id: int,
+    tags: list[str],
+    config: AppConfig | None = None,
+) -> None:
+    """Set the tags for a document, replacing any existing tags."""
+    if config is None:
+        config = AppConfig()
+
+    init_db(config)
+
+    with get_db(config.db_path) as conn:
+        cursor = conn.cursor()
+        try:
+            # Delete existing tags
+            cursor.execute("DELETE FROM document_tags WHERE document_id = ?", (doc_id,))
+            # Insert new tags
+            if tags:
+                cursor.executemany(
+                    "INSERT INTO document_tags (document_id, tag) VALUES (?, ?)",
+                    [(doc_id, tag.strip()) for tag in tags if tag.strip()]
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    # Regenerate global catalog
+    generate_global_catalog(config)
+
+
+def get_document_tags(
+    doc_id: int,
+    config: AppConfig | None = None,
+) -> list[str]:
+    """Retrieve the tags for a specific document."""
+    if config is None:
+        config = AppConfig()
+
+    init_db(config)
+
+    with get_db(config.db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT tag FROM document_tags WHERE document_id = ? ORDER BY tag ASC",
+            (doc_id,),
+        )
+        return [row['tag'] for row in cursor.fetchall()]
+
+
+def generate_global_catalog(config: AppConfig | None = None) -> None:
+    """Generate global_catalog.md in the output directory, grouping documents by tags."""
+    if config is None:
+        config = AppConfig()
+
+    init_db(config)
+
+    # Ensure output directory exists
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    catalog_path = config.output_dir / "global_catalog.md"
+
+    with get_db(config.db_path) as conn:
+        cursor = conn.cursor()
+        # Get all documents
+        cursor.execute(
+            "SELECT id, filename, upload_time, status FROM documents ORDER BY upload_time DESC"
+        )
+        docs = [dict(row) for row in cursor.fetchall()]
+
+        # Get tags for each document
+        cursor.execute("SELECT document_id, tag FROM document_tags")
+        tags_rows = cursor.fetchall()
+
+    # Map doc_id to tags
+    doc_tags: dict[int, list[str]] = {}
+    for r in tags_rows:
+        doc_id = r['document_id']
+        tag = r['tag']
+        if doc_id not in doc_tags:
+            doc_tags[doc_id] = []
+        doc_tags[doc_id].append(tag)
+
+    # Group documents by tag
+    tagged_docs: dict[str, list[dict]] = {}
+    untagged_docs: list[dict] = []
+
+    for doc in docs:
+        doc_id = doc['id']
+        tags = doc_tags.get(doc_id, [])
+        doc['tags'] = tags
+        if not tags:
+            untagged_docs.append(doc)
+        else:
+            for tag in tags:
+                if tag not in tagged_docs:
+                    tagged_docs[tag] = []
+                tagged_docs[tag].append(doc)
+
+    # Sort tags alphabetically
+    sorted_tags = sorted(tagged_docs.keys())
+
+    with open(catalog_path, "w", encoding="utf-8") as f:
+        f.write("# 📚 全域知識庫目錄\n\n")
+        f.write("> 此目錄按標籤/分類整理所有已結構化的文件，供 LLM 與 RAG 代理快速檢索目錄，節省 Token 消耗。\n\n")
+
+        if not docs:
+            f.write("*目前沒有任何已結構化的文件。*\n")
+            return
+
+        # Write tagged categories
+        for tag in sorted_tags:
+            f.write(f"## 🏷️ {tag}\n\n")
+            for doc in tagged_docs[tag]:
+                f.write(
+                    f"* [{doc['filename']} (ID: {doc['id']})]({doc['id']}/index.md) - *上傳時間: {doc['upload_time']}*\n"
+                )
+            f.write("\n")
+
+        # Write untagged documents
+        if untagged_docs:
+            f.write("## 🏷️ 未分類文件\n\n")
+            for doc in untagged_docs:
+                f.write(
+                    f"* [{doc['filename']} (ID: {doc['id']})]({doc['id']}/index.md) - *上傳時間: {doc['upload_time']}*\n"
+                )
+            f.write("\n")

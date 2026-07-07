@@ -2,6 +2,10 @@
 
 import re
 import logging
+import os
+import tempfile
+import base64
+import json
 
 from docx import Document
 
@@ -81,10 +85,47 @@ class DocxExtractor:
         """
         doc = Document(file_path)
         lines: list[tuple[int, str]] = []
-
         page_num = 1
+
+        temp_dir = tempfile.mkdtemp(prefix="doc_structuring_docx_")
+
+        def get_para_drawings(para, d):
+            drawings = []
+            for blip in para._p.xpath('.//a:blip'):
+                rId = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
+                if rId and rId in d.part.related_parts:
+                    drawings.append(rId)
+            return drawings
+
+        img_idx = 1
         for para in doc.paragraphs:
             line = para.text.strip()
+
+            # Extract drawings if any
+            rIds = get_para_drawings(para, doc)
+            for rId in rIds:
+                image_part = doc.part.related_parts[rId]
+                try:
+                    image_bytes = image_part.image.blob
+                    ext = image_part.image.ext or "png"
+                    img_filename = f"docx_img_{img_idx}.{ext}"
+                    temp_path = os.path.join(temp_dir, img_filename)
+                    with open(temp_path, "wb") as img_f:
+                        img_f.write(image_bytes)
+
+                    # Create placeholder comment for database.py
+                    meta = {
+                        "temp_path": temp_path,
+                        "caption": f"Document Image {img_idx}",
+                        "contained_text": []
+                    }
+                    meta_str = json.dumps(meta, ensure_ascii=False)
+                    placeholder_line = f"<!-- IMAGE: {meta_str} -->"
+                    lines.append((page_num, placeholder_line))
+                    img_idx += 1
+                except Exception as exc:
+                    logger.error("Failed to extract DOCX image with rId %s: %s", rId, exc)
+
             if not line:
                 continue
 

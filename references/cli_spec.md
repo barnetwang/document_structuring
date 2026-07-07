@@ -32,6 +32,7 @@ The CLI tool is installed as `doc-structuring`.
 - **Description**: Parses a PDF or DOCX file, chunks it into Markdown sections, and logs the metadata and chunks into SQLite and disk.
 - **Arguments**:
   - `--file <path>` (required): Path to the input PDF or DOCX document.
+  - `--tags "<comma-separated-tags>"` (optional): Optional tags to assign to the document.
   - `--output <path.json>` (required): Path to write the JSON operation summary.
 - **Output JSON Format**:
   ```json
@@ -140,6 +141,14 @@ The CLI tool is installed as `doc-structuring`.
   - `--doc-id <id>` (required): Database ID of the document to delete.
 - **Stdout Output Format**:
   `Success: Document 'your-manual.pdf' (ID: 1) and all its associated chunks have been deleted.`
+
+### `tag`
+- **Description**: Assigns or updates tags for a specific document, updating `output/global_catalog.md`.
+- **Arguments**:
+  - `--doc-id <id>` (required): Database ID of the document.
+  - `--tags "<comma-separated-tags>"` (required): Comma-separated list of tags to assign.
+- **Stdout Output Format**:
+  `Success: Tags for document ID 1 set to: tag1, tag2`
 
 ---
 

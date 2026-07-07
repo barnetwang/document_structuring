@@ -43,8 +43,18 @@ Follow these steps to parse and index a new manual:
   doc-structuring parse --file <path/to/manual.pdf> --output <temp_parse.json>
   ```
   *Completion Criterion*: The command exits successfully, producing the output JSON with `"success": true`.
-- **Step 4: Verify Database Logging**. Check that `documents.db` is updated and physical chunks are generated under `output/<document_id>/chunks/`.
-  *Completion Criterion*: The output directory containing structured `.md` files and the SQLite records are verified to exist.
+- **Step 4: Interactive Categorization / Tagging**.
+  - Read the intro chunk (e.g. `0_Introduction.md` or output of `get-chunk`) to understand the topic of the document.
+  - Predict the most likely category/tags (e.g. `[技術文件] [Intel Platform]`).
+  - Prompt the user in the chat: *"I have structured the file and predicted these tags: [predicted_tags]. Would you like to save it with these tags, or assign different tags?"*
+  - Based on user response, run the tagging command:
+    ```bash
+    doc-structuring tag --doc-id <id> --tags "<comma-separated-tags>"
+    ```
+  - Verify that the global catalog `output/global_catalog.md` is updated.
+  *Completion Criterion*: The tagging CLI command completes successfully and the global catalog is verified.
+- **Step 5: Verify Database Logging**. Check that `documents.db` is updated, physical chunks are generated under `output/<document_id>/chunks/`, and physical images are extracted under `output/<document_id>/images/`.
+  *Completion Criterion*: The output directory containing structured `.md` files, extracted drawings, and the SQLite records are verified to exist.
 
 ### 2. Document Search & Retrieval
 

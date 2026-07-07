@@ -60,7 +60,11 @@ def handle_parse(args: argparse.Namespace, config: AppConfig) -> None:
             logger.error("No content could be extracted or parsed.")
             sys.exit(1)
 
-        doc_id = database.save_document(filename, chunks, config=config)
+        tags_list = None
+        if args.tags:
+            tags_list = [t.strip() for t in args.tags.split(",") if t.strip()]
+
+        doc_id = database.save_document(filename, chunks, config=config, tags=tags_list)
 
         result = {
             "success": True,
@@ -71,6 +75,20 @@ def handle_parse(args: argparse.Namespace, config: AppConfig) -> None:
         _write_json_output(result, args.output)
     except Exception as exc:
         logger.error("Error processing document: %s", exc)
+        sys.exit(1)
+
+
+def handle_tag(args: argparse.Namespace, config: AppConfig) -> None:
+    """Set tags for a document, updating global_catalog.md."""
+    try:
+        tags_list = [t.strip() for t in args.tags.split(",") if t.strip()]
+        database.set_document_tags(args.doc_id, tags_list, config=config)
+        current_tags = database.get_document_tags(args.doc_id, config=config)
+        print(
+            f"Success: Tags for document ID {args.doc_id} set to: {', '.join(current_tags)}"
+        )
+    except Exception as exc:
+        logger.error("Error setting tags for document ID %s: %s", args.doc_id, exc)
         sys.exit(1)
 
 
@@ -168,6 +186,9 @@ def main() -> None:
         "--file", required=True, help="Path to input document file"
     )
     p_parse.add_argument(
+        "--tags", help="Optional comma-separated tags to assign to the document"
+    )
+    p_parse.add_argument(
         "--output", required=True, help="Path to write the JSON operation summary"
     )
     p_parse.set_defaults(func=handle_parse)
@@ -229,6 +250,18 @@ def main() -> None:
         help="Database ID of the document to delete",
     )
     p_delete.set_defaults(func=handle_delete)
+
+    # -- tag -----------------------------------------------------------
+    p_tag = subparsers.add_parser(
+        "tag", help="Assign or update tags for a specific document"
+    )
+    p_tag.add_argument(
+        "--doc-id", type=int, required=True, help="Database ID of the document"
+    )
+    p_tag.add_argument(
+        "--tags", required=True, help="Comma-separated list of tags to assign"
+    )
+    p_tag.set_defaults(func=handle_tag)
 
     # -- dispatch ------------------------------------------------------
     args = parser.parse_args()
