@@ -28,6 +28,14 @@ def _write_json_output(data: dict, output_path: str) -> None:
         sys.exit(1)
 
 
+def _extract_kwargs(config: AppConfig) -> dict:
+    """Common kwargs passed into format extractors."""
+    return {
+        "temp_dir": str(config.temp_dir),
+        "ignore_patterns": config.compiled_ignore_patterns(),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Subcommand handlers
 # ---------------------------------------------------------------------------
@@ -52,9 +60,21 @@ def handle_parse(args: argparse.Namespace, config: AppConfig) -> None:
 
     try:
         logger.info("Parsing document '%s'...", filename)
-        lines = extractor.extract_lines(str(file_path))
+        extract_kw = _extract_kwargs(config)
+        if ext == ".pdf":
+            lines = extractor.extract_lines(
+                str(file_path),
+                batch_size=config.pdf_batch_size,
+                **extract_kw,
+            )
+        else:
+            lines = extractor.extract_lines(str(file_path), **extract_kw)
 
-        chunks = parse_into_chunks(lines, filename)
+        chunks = parse_into_chunks(
+            lines,
+            filename,
+            bad_keywords=config.bad_heading_keywords,
+        )
 
         if not chunks:
             logger.error("No content could be extracted or parsed.")
@@ -64,7 +84,9 @@ def handle_parse(args: argparse.Namespace, config: AppConfig) -> None:
         if args.tags:
             tags_list = [t.strip() for t in args.tags.split(",") if t.strip()]
 
-        doc_id = database.save_document(filename, chunks, config=config, tags=tags_list)
+        doc_id = database.save_document(
+            filename, chunks, config=config, tags=tags_list
+        )
 
         result = {
             "success": True,
@@ -85,10 +107,13 @@ def handle_tag(args: argparse.Namespace, config: AppConfig) -> None:
         database.set_document_tags(args.doc_id, tags_list, config=config)
         current_tags = database.get_document_tags(args.doc_id, config=config)
         print(
-            f"Success: Tags for document ID {args.doc_id} set to: {', '.join(current_tags)}"
+            f"Success: Tags for document ID {args.doc_id} set to: "
+            f"{', '.join(current_tags)}"
         )
     except Exception as exc:
-        logger.error("Error setting tags for document ID %s: %s", args.doc_id, exc)
+        logger.error(
+            "Error setting tags for document ID %s: %s", args.doc_id, exc
+        )
         sys.exit(1)
 
 
@@ -163,7 +188,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Document Structuring CLI Tool. "
-            "Slices files and manages a SQLite database."
+            "Slices PDF/DOCX files into searchable Markdown chunks "
+            "backed by SQLite FTS5."
         ),
     )
     parser.add_argument(
@@ -172,6 +198,20 @@ def main() -> None:
         action="count",
         default=0,
         help="Increase output verbosity (-v for INFO, -vv for DEBUG).",
+    )
+    parser.add_argument(
+        "--base-dir",
+        default=None,
+        help=(
+            "Workspace root for documents.db and output/ "
+            "(default: DOC_STRUCTURING_BASE_DIR or CWD)."
+        ),
+    )
+    parser.add_argument(
+        "--locale",
+        default=None,
+        choices=["en", "zh"],
+        help="Language for generated catalog/index labels (default: en).",
     )
 
     subparsers = parser.add_subparsers(
@@ -246,7 +286,9 @@ def main() -> None:
         "delete", help="Delete a document and its segments from DB and disk"
     )
     p_delete.add_argument(
-        "--doc-id", type=int, required=True,
+        "--doc-id",
+        type=int,
+        required=True,
         help="Database ID of the document to delete",
     )
     p_delete.set_defaults(func=handle_delete)
@@ -266,7 +308,6 @@ def main() -> None:
     # -- dispatch ------------------------------------------------------
     args = parser.parse_args()
 
-    # Configure logging based on verbosity
     level = {0: logging.WARNING, 1: logging.INFO}.get(
         args.verbose, logging.DEBUG
     )
@@ -274,7 +315,12 @@ def main() -> None:
         level=level, format="%(levelname)s: %(name)s: %(message)s"
     )
 
-    config = AppConfig()
+    config_kwargs: dict = {}
+    if args.base_dir:
+        config_kwargs["base_dir"] = Path(args.base_dir)
+    if args.locale:
+        config_kwargs["locale"] = args.locale
+    config = AppConfig(**config_kwargs) if config_kwargs else AppConfig()
     args.func(args, config)
 
 

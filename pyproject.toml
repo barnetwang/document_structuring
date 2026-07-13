@@ -7,7 +7,7 @@ name = "doc-structuring"
 version = "0.1.0"
 description = "RAG document parser: slice PDF/DOCX into structured, searchable chunks"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 readme = "README.md"
 dependencies = [
     "PyMuPDF>=1.24.0",

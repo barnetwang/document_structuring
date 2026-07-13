@@ -1,11 +1,14 @@
 """DOCX document extractor using python-docx."""
 
+from __future__ import annotations
+
 import re
 import logging
 import os
 import tempfile
-import base64
 import json
+from pathlib import Path
+from typing import Sequence
 
 from docx import Document
 
@@ -16,15 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def _is_bold_paragraph(para) -> bool:
-    """Check whether every non-whitespace run in a paragraph is bold.
-
-    Args:
-        para: A python-docx Paragraph object.
-
-    Returns:
-        True if all non-empty runs are bold; False otherwise (including
-        when there are no non-empty runs).
-    """
+    """Check whether every non-whitespace run in a paragraph is bold."""
     runs = [r for r in para.runs if r.text.strip()]
     if not runs:
         return False
@@ -37,12 +32,6 @@ def _merge_split_headings(lines: list[tuple[int, str]]) -> list[tuple[int, str]]
     Some DOCX exports produce two consecutive paragraphs for a single
     heading — e.g. ``"1.2"`` followed by ``"Overview"``.  This function
     joins them back into ``"1.2 Overview"``.
-
-    Args:
-        lines: A list of (page_number, text) tuples.
-
-    Returns:
-        A new list with split headings merged.
     """
     merged: list[tuple[int, str]] = []
     i = 0
@@ -50,9 +39,9 @@ def _merge_split_headings(lines: list[tuple[int, str]]) -> list[tuple[int, str]]
     while i < len(lines):
         page_num, line = lines[i]
 
-        if re.match(r'^\d+(\.\d+)*$', line) and i + 1 < len(lines):
+        if re.match(r"^\d+(\.\d+)*$", line) and i + 1 < len(lines):
             _, next_line = lines[i + 1]
-            if not re.match(r'^\d+(\.\d+)*$', next_line):
+            if not re.match(r"^\d+(\.\d+)*$", next_line):
                 merged.append((page_num, f"{line} {next_line}"))
                 i += 2
                 continue
@@ -73,11 +62,19 @@ class DocxExtractor:
     fallback.
     """
 
-    def extract_lines(self, file_path: str) -> list[tuple[int, str]]:
+    def extract_lines(
+        self,
+        file_path: str,
+        *,
+        temp_dir: str | Path | None = None,
+        ignore_patterns: Sequence[re.Pattern[str]] | None = None,
+    ) -> list[tuple[int, str]]:
         """Extract text lines from a DOCX file.
 
         Args:
             file_path: Path to the DOCX file.
+            temp_dir: Optional parent for temporary image extraction.
+            ignore_patterns: Optional line filters (defaults to built-ins).
 
         Returns:
             A list of (1-based page number, text line) tuples with
@@ -85,68 +82,74 @@ class DocxExtractor:
         """
         doc = Document(file_path)
         lines: list[tuple[int, str]] = []
+        # DOCX has no reliable page map; keep a constant page marker.
         page_num = 1
 
-        temp_dir = tempfile.mkdtemp(prefix="doc_structuring_docx_")
+        work_dir_parent = Path(temp_dir) if temp_dir else Path(".doc_structuring_tmp")
+        work_dir_parent.mkdir(parents=True, exist_ok=True)
+        work_dir = tempfile.mkdtemp(
+            prefix="doc_structuring_docx_", dir=str(work_dir_parent)
+        )
 
         def get_para_drawings(para, d):
             drawings = []
-            for blip in para._p.xpath('.//a:blip'):
-                rId = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
-                if rId and rId in d.part.related_parts:
-                    drawings.append(rId)
+            for blip in para._p.xpath(".//a:blip"):
+                r_id = blip.get(
+                    "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
+                )
+                if r_id and r_id in d.part.related_parts:
+                    drawings.append(r_id)
             return drawings
 
         img_idx = 1
         for para in doc.paragraphs:
             line = para.text.strip()
 
-            # Extract drawings if any
-            rIds = get_para_drawings(para, doc)
-            for rId in rIds:
-                image_part = doc.part.related_parts[rId]
+            r_ids = get_para_drawings(para, doc)
+            for r_id in r_ids:
+                image_part = doc.part.related_parts[r_id]
                 try:
                     image_bytes = image_part.image.blob
                     ext = image_part.image.ext or "png"
                     img_filename = f"docx_img_{img_idx}.{ext}"
-                    temp_path = os.path.join(temp_dir, img_filename)
+                    temp_path = os.path.join(work_dir, img_filename)
                     with open(temp_path, "wb") as img_f:
                         img_f.write(image_bytes)
 
-                    # Create placeholder comment for database.py
                     meta = {
                         "temp_path": temp_path,
                         "caption": f"Document Image {img_idx}",
-                        "contained_text": []
+                        "contained_text": [],
                     }
-                    meta_str = json.dumps(meta, ensure_ascii=False)
-                    placeholder_line = f"<!-- IMAGE: {meta_str} -->"
+                    placeholder_line = (
+                        f"<!-- IMAGE: {json.dumps(meta, ensure_ascii=False)} -->"
+                    )
                     lines.append((page_num, placeholder_line))
                     img_idx += 1
                 except Exception as exc:
-                    logger.error("Failed to extract DOCX image with rId %s: %s", rId, exc)
+                    logger.error(
+                        "Failed to extract DOCX image with rId %s: %s", r_id, exc
+                    )
 
             if not line:
                 continue
 
-            # Convert paragraph styles to markdown headers
             if para.style and para.style.name:
                 style_name = para.style.name
-                if style_name.startswith('Heading '):
+                if style_name.startswith("Heading "):
                     try:
-                        level = int(style_name.split(' ')[1])
-                        line = '#' * level + ' ' + line
+                        level = int(style_name.split(" ")[1])
+                        line = "#" * level + " " + line
                     except ValueError:
                         pass
-                elif style_name == 'Title':
-                    line = '# ' + line
-                elif style_name == 'Subtitle':
-                    line = '## ' + line
-            # Fallback: if paragraph is short and entirely bold, treat as a heading
+                elif style_name == "Title":
+                    line = "# " + line
+                elif style_name == "Subtitle":
+                    line = "## " + line
             elif len(line) < 80 and _is_bold_paragraph(para):
-                line = '## ' + line
+                line = "## " + line
 
-            if not is_ignored(line, is_markdown=True):
+            if not is_ignored(line, is_markdown=True, ignore_patterns=ignore_patterns):
                 lines.append((page_num, line))
 
         return _merge_split_headings(lines)

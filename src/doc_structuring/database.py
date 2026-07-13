@@ -20,6 +20,57 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 3
 
+# Labels for generated Markdown (locale-aware, English default for portability)
+_LABELS: dict[str, dict[str, str]] = {
+    "en": {
+        "diagrams_heading": "###### Diagrams & Contained Text:",
+        "image_bullet": "Image",
+        "contained_text": "Contained text",
+        "index_title": "# Document Knowledge Base",
+        "index_intro": (
+            "> Auto-generated section index for LLM / RAG retrieval.\n"
+        ),
+        "dir_structure": "## Directory Structure",
+        "section_index": "## Section Index",
+        "image_link": "Image",
+        "catalog_title": "# Global Document Catalog",
+        "catalog_intro": (
+            "> Documents grouped by tags for fast agent browsing "
+            "without loading full content.\n"
+        ),
+        "catalog_empty": "*No structured documents yet.*\n",
+        "catalog_untagged": "Untagged",
+        "uploaded": "uploaded",
+    },
+    "zh": {
+        "diagrams_heading": "###### 圖表及包含文字 (Diagrams & Contained Text):",
+        "image_bullet": "圖片",
+        "contained_text": "包含文字",
+        "index_title": "# 📄 Document Knowledge Base",
+        "index_intro": (
+            "> 此目錄與文件區塊由自動化腳本生成，為後續 LLM 與 RAG 查詢使用。\n"
+        ),
+        "dir_structure": "## 📁 Directory Structure",
+        "section_index": "## 🔗 Section Index",
+        "image_link": "Image",
+        "catalog_title": "# 📚 全域知識庫目錄",
+        "catalog_intro": (
+            "> 此目錄按標籤/分類整理所有已結構化的文件，"
+            "供 LLM 與 RAG 代理快速檢索目錄，節省 Token 消耗。\n"
+        ),
+        "catalog_empty": "*目前沒有任何已結構化的文件。*\n",
+        "catalog_untagged": "未分類文件",
+        "uploaded": "上傳時間",
+    },
+}
+
+
+def _labels(locale: str) -> dict[str, str]:
+    key = (locale or "en").lower()
+    if key.startswith("zh"):
+        return _LABELS["zh"]
+    return _LABELS["en"]
+
 
 # ---------------------------------------------------------------------------
 # Connection helpers
@@ -419,12 +470,18 @@ def save_document(
             f.write("content:\n")
             f.write(new_content)
             if chunk_images:
-                f.write("\n\n###### 圖表及包含文字 (Diagrams & Contained Text):\n")
+                lbl = _labels(config.locale)
+                f.write(f"\n\n{lbl['diagrams_heading']}\n")
                 for img in chunk_images:
-                    f.write(f"- **圖片: {img['caption']}** ({img['rel_path']})\n")
+                    f.write(
+                        f"- **{lbl['image_bullet']}: {img['caption']}** "
+                        f"({img['rel_path']})\n"
+                    )
                     if img["contained_text"]:
-                        words_str = ", ".join([w["text"] for w in img["contained_text"]])
-                        f.write(f"  * 包含文字: {words_str}\n")
+                        words_str = ", ".join(
+                            [w["text"] for w in img["contained_text"]]
+                        )
+                        f.write(f"  * {lbl['contained_text']}: {words_str}\n")
 
         update_pairs.append((f"{base_prefix}{chunk_filename}", chunk_db_id))
 
@@ -462,15 +519,15 @@ def save_document(
             "images": entry.get("images", []),
         }
 
-    generate_document_index_file(doc_dir, toc_dict_for_display)
+    generate_document_index_file(doc_dir, toc_dict_for_display, locale=config.locale)
 
-    # Clean up temp_pdf_tmp directory if it exists
-    temp_pdf_dir = Path("temp_pdf_tmp")
-    if temp_pdf_dir.exists():
-        try:
-            shutil.rmtree(temp_pdf_dir)
-        except Exception:
-            pass
+    # Clean up scratch directory used by extractors
+    for scratch in (config.temp_dir, Path("temp_pdf_tmp"), Path(".doc_structuring_tmp")):
+        if scratch.exists():
+            try:
+                shutil.rmtree(scratch)
+            except Exception:
+                pass
 
     # Update global catalog
     generate_global_catalog(config)
@@ -481,22 +538,24 @@ def save_document(
 def generate_document_index_file(
     doc_dir: Path,
     toc: dict[str, dict[str, Any]],
+    locale: str = "en",
 ) -> None:
     """Write an ``index.md`` summarising a document's chunks."""
     index_path = doc_dir / "index.md"
+    lbl = _labels(locale)
 
     def _sort_key(k: str) -> list[tuple[int, int, str]]:
         # Extract section number part before the _id suffix
-        sec_num = k.rsplit('_', 1)[0]
+        sec_num = k.rsplit("_", 1)[0]
         return section_sort_key(sec_num)
 
     sorted_keys = sorted(toc.keys(), key=_sort_key)
 
     with open(index_path, "w", encoding="utf-8") as f:
-        f.write("# 📄 Document Knowledge Base\n\n")
-        f.write("> 此目錄與文件區塊由自動化腳本生成，為後續 LLM 與 RAG 查詢使用。\n\n")
+        f.write(f"{lbl['index_title']}\n\n")
+        f.write(f"{lbl['index_intro']}\n")
 
-        f.write("## 📁 Directory Structure\n\n")
+        f.write(f"{lbl['dir_structure']}\n\n")
         f.write("```text\n")
         f.write("output/\n")
         f.write("└── chunks/\n")
@@ -506,23 +565,23 @@ def generate_document_index_file(
             f.write(f"{connector}{toc[k]['file']}\n")
         f.write("```\n\n")
 
-        f.write("## 🔗 Section Index\n\n")
+        f.write(f"{lbl['section_index']}\n\n")
         for k in sorted_keys:
-            title = toc[k]['title']
-            chunk_filename = toc[k]['file']
-            images = toc[k].get('images', [])
+            title = toc[k]["title"]
+            chunk_filename = toc[k]["file"]
+            images = toc[k].get("images", [])
 
-            # Remove the _id suffix from the key for clean display
-            display_sec = k.rsplit('_', 1)[0]
-
-            depth = display_sec.count('.')
+            display_sec = k.rsplit("_", 1)[0]
+            depth = display_sec.count(".")
             indent = "  " * depth
 
             f.write(f"{indent}* [{display_sec} {title}](chunks/{chunk_filename})\n")
             if images:
                 for img in images:
-                    img_name = img.split('/')[-1]
-                    f.write(f"{indent}  * [🖼️ Image: {img_name}]({img})\n")
+                    img_name = img.split("/")[-1]
+                    f.write(
+                        f"{indent}  * [{lbl['image_link']}: {img_name}]({img})\n"
+                    )
 
 
 def list_documents(config: AppConfig | None = None) -> list[dict]:
@@ -632,7 +691,11 @@ def search_chunks(
         sql += " AND c.document_id = ?"
         params.append(document_id)
 
-    sql += " ORDER BY d.upload_time DESC, c.section_number ASC LIMIT 100"
+    limit = max(1, int(config.search_limit))
+    sql += (
+        " ORDER BY d.upload_time DESC, c.section_number ASC LIMIT ?"
+    )
+    params.append(limit)
 
     with get_db(config.db_path) as conn:
         cursor = conn.cursor()
@@ -661,8 +724,9 @@ def search_chunks(
                 params_fallback.append(document_id)
 
             sql_fallback += (
-                " ORDER BY d.upload_time DESC, c.section_number ASC LIMIT 100"
+                " ORDER BY d.upload_time DESC, c.section_number ASC LIMIT ?"
             )
+            params_fallback.append(limit)
 
             cursor.execute(sql_fallback, params_fallback)
             results = [dict(row) for row in cursor.fetchall()]
@@ -829,28 +893,31 @@ def generate_global_catalog(config: AppConfig | None = None) -> None:
     # Sort tags alphabetically
     sorted_tags = sorted(tagged_docs.keys())
 
+    lbl = _labels(config.locale)
     with open(catalog_path, "w", encoding="utf-8") as f:
-        f.write("# 📚 全域知識庫目錄\n\n")
-        f.write("> 此目錄按標籤/分類整理所有已結構化的文件，供 LLM 與 RAG 代理快速檢索目錄，節省 Token 消耗。\n\n")
+        f.write(f"{lbl['catalog_title']}\n\n")
+        f.write(f"{lbl['catalog_intro']}\n")
 
         if not docs:
-            f.write("*目前沒有任何已結構化的文件。*\n")
+            f.write(lbl["catalog_empty"])
             return
 
-        # Write tagged categories
         for tag in sorted_tags:
-            f.write(f"## 🏷️ {tag}\n\n")
+            f.write(f"## {tag}\n\n")
             for doc in tagged_docs[tag]:
                 f.write(
-                    f"* [{doc['filename']} (ID: {doc['id']})]({doc['id']}/index.md) - *上傳時間: {doc['upload_time']}*\n"
+                    f"* [{doc['filename']} (ID: {doc['id']})]"
+                    f"({doc['id']}/index.md) - "
+                    f"*{lbl['uploaded']}: {doc['upload_time']}*\n"
                 )
             f.write("\n")
 
-        # Write untagged documents
         if untagged_docs:
-            f.write("## 🏷️ 未分類文件\n\n")
+            f.write(f"## {lbl['catalog_untagged']}\n\n")
             for doc in untagged_docs:
                 f.write(
-                    f"* [{doc['filename']} (ID: {doc['id']})]({doc['id']}/index.md) - *上傳時間: {doc['upload_time']}*\n"
+                    f"* [{doc['filename']} (ID: {doc['id']})]"
+                    f"({doc['id']}/index.md) - "
+                    f"*{lbl['uploaded']}: {doc['upload_time']}*\n"
                 )
             f.write("\n")

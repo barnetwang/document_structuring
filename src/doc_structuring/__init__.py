@@ -19,6 +19,7 @@ def parse_file(
     *,
     config: AppConfig | None = None,
     save_to_db: bool = True,
+    tags: list[str] | None = None,
 ) -> dict:
     """High-level API: parse a document file and optionally persist to database.
 
@@ -26,6 +27,7 @@ def parse_file(
         file_path: Path to a PDF or DOCX file.
         config: Optional AppConfig; defaults to AppConfig() if not provided.
         save_to_db: If True, save chunks to SQLite and write physical files.
+        tags: Optional classification tags stored with the document.
 
     Returns:
         dict with keys: document_id (if saved), filename, chunks, chunk_count.
@@ -41,8 +43,20 @@ def parse_file(
     filename = p.name
 
     extractor = get_extractor(ext)
-    lines = extractor.extract_lines(str(p))
-    chunks = parse_into_chunks(lines, filename)
+    extract_kw = {
+        "temp_dir": str(config.temp_dir),
+        "ignore_patterns": config.compiled_ignore_patterns(),
+    }
+    if ext == ".pdf":
+        lines = extractor.extract_lines(
+            str(p), batch_size=config.pdf_batch_size, **extract_kw
+        )
+    else:
+        lines = extractor.extract_lines(str(p), **extract_kw)
+
+    chunks = parse_into_chunks(
+        lines, filename, bad_keywords=config.bad_heading_keywords
+    )
 
     result = {
         "filename": filename,
@@ -51,7 +65,7 @@ def parse_file(
     }
 
     if save_to_db:
-        doc_id = save_document(filename, chunks, config=config)
+        doc_id = save_document(filename, chunks, config=config, tags=tags)
         result["document_id"] = doc_id
 
     return result

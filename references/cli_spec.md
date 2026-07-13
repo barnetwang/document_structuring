@@ -1,62 +1,86 @@
 # CLI Specification Reference — doc-structuring
 
-This reference document contains the detailed CLI specifications, output formats, token economics, and troubleshooting tips for the `doc-structuring` tool.
+Detailed CLI specifications, output formats, configuration, token economics,
+and troubleshooting for the `doc-structuring` tool.
 
 ---
 
 ## Prerequisites
 
-Before running any of the CLI commands below, verify that the package is installed in the active environment:
 ```bash
 pip install -e .
 ```
-- **Python Environment**: Python 3.10+
-- **Dependencies**: `PyMuPDF`, `pymupdf4llm`, `python-docx`
+
+- **Python**: 3.10+
+- **Dependencies**: `PyMuPDF`, `pymupdf4llm`, `python-docx` (these heavy packages are lazily loaded on-demand, meaning they are only required when running the `parse` command)
 
 ---
 
-## Data Layout
+## Configuration
 
-All file pathways are relative to the project workspace root:
-- **SQLite Database**: `documents.db` (contains metadata, chunk definitions, and the FTS5 search index)
-- **Chunk Directory**: `output/<document_id>/chunks/` (contains physical `.md` files for each parsed segment)
-- **TOC & Index**: `output/<document_id>/toc.json` (list of headings) and `output/<document_id>/index.md` (Markdown directory tree)
+| Source | Effect |
+| ------ | ------ |
+| CWD / `--base-dir` / `DOC_STRUCTURING_BASE_DIR` | Root for `documents.db` and `output/` |
+| `--locale` / `DOC_STRUCTURING_LOCALE` | Generated catalog/index language (`en` default, `zh` supported) |
+| `AppConfig.extra_ignore_patterns` | Extra regexes for header/footer line filtering (Python API) |
+| `AppConfig.bad_heading_keywords` | Title substrings rejected as section headings |
+| `AppConfig.pdf_batch_size` | Pages per PDF markdown batch (default 50) |
+| `AppConfig.search_limit` | Max FTS/LIKE search hits (default 100) |
+
+Global flags (before the subcommand):
+
+```bash
+doc-structuring [--base-dir PATH] [--locale en|zh] [-v|-vv] <command> ...
+```
 
 ---
 
-## CLI Subcommands
+## Data layout
 
-The CLI tool is installed as `doc-structuring`.
+Relative to the configured base directory:
+
+- **SQLite**: `documents.db` (metadata, chunks, FTS5 index)
+- **Chunks**: `output/<document_id>/chunks/*.md`
+- **Images**: `output/<document_id>/images/` (when graphics were extracted)
+- **TOC / index**: `output/<document_id>/toc.json`, `output/<document_id>/index.md`
+- **Catalog**: `output/global_catalog.md` (documents grouped by tags)
+
+---
+
+## CLI subcommands
+
+Installed entry point: `doc-structuring`.
 
 ### `parse`
-- **Description**: Parses a PDF or DOCX file, chunks it into Markdown sections, and logs the metadata and chunks into SQLite and disk.
+
+- **Description**: Parse a PDF or DOCX, chunk into Markdown sections, persist
+  to SQLite and disk.
 - **Arguments**:
-  - `--file <path>` (required): Path to the input PDF or DOCX document.
-  - `--tags "<comma-separated-tags>"` (optional): Optional tags to assign to the document.
-  - `--output <path.json>` (required): Path to write the JSON operation summary.
-- **Output JSON Format**:
+  - `--file <path>` (required)
+  - `--tags "<comma-separated-tags>"` (optional)
+  - `--output <path.json>` (required)
+- **Output JSON**:
   ```json
   {
     "success": true,
     "document_id": 1,
-    "filename": "your-manual.pdf",
-    "chunk_count": 9834
+    "filename": "manual.pdf",
+    "chunk_count": 120
   }
   ```
 
 ### `list`
-- **Description**: Lists all structured documents tracked in the SQLite database.
-- **Arguments**:
-  - `--output <path.json>` (required): Path to write the JSON output file.
-- **Output JSON Format**:
+
+- **Arguments**: `--output <path.json>` (required)
+- **Output JSON**:
   ```json
   {
     "documents": [
       {
         "id": 1,
-        "filename": "your-manual.pdf",
+        "filename": "manual.pdf",
         "upload_time": "2026-06-19 07:44:28",
-        "chunk_count": 9834,
+        "chunk_count": 120,
         "status": "success"
       }
     ]
@@ -64,109 +88,56 @@ The CLI tool is installed as `doc-structuring`.
   ```
 
 ### `toc`
-- **Description**: Returns all headings/chunks of a document, sorted by section numbers.
-- **Arguments**:
-  - `--doc-id <id>` (required): The document ID.
-  - `--output <path.json>` (required): Path to write the JSON output file.
-- **Output JSON Format**:
-  ```json
-  {
-    "toc": [
-      {
-        "id": 1,
-        "section_number": "1",
-        "title": "Introduction",
-        "page_start": 1,
-        "file_path": "output/1/chunks/1_1_Introduction.md"
-      },
-      {
-        "id": 2,
-        "section_number": "1.1",
-        "title": "Background",
-        "page_start": 2,
-        "file_path": "output/1/chunks/2_1.1_Background.md"
-      }
-    ]
-  }
-  ```
+
+- **Arguments**: `--doc-id <id>`, `--output <path.json>` (required)
+- **Output JSON**: list of chunks with `id`, `section_number`, `title`,
+  `page_start`, `file_path`.
 
 ### `search`
-- **Description**: Performs a keyword lookup against the chunk titles and text content in the database using SQLite FTS5 index.
+
 - **Arguments**:
-  - `--query <string>` (required): The keyword query string. Multiple terms are combined automatically with AND operators. For OR queries, use SQLite FTS5 syntax (e.g. `"term1 OR term2"`).
-  - `--doc-id <id>` (optional): Filter results to a specific document.
-  - `--output <path.json>` (required): Path to write the JSON search results.
-- **Output JSON Format**:
-  ```json
-  {
-    "results": [
-      {
-        "id": 123,
-        "document_id": 1,
-        "section_number": "3.2",
-        "title": "ACPI States",
-        "page_start": 45,
-        "file_path": "output/1/chunks/123_3.2_ACPI_States.md",
-        "document_name": "your-manual.pdf",
-        "snippet": "This section explains ==ACPI== states and sleep modes..."
-      }
-    ]
-  }
-  ```
+  - `--query <string>` (required) — multi-word queries default to AND
+  - `--doc-id <id>` (optional)
+  - `--output <path.json>` (required)
+- **Output JSON**: `results` array with snippet highlighting (`==term==`).
 
 ### `get-chunk`
-- **Description**: Retrieves full metadata and markdown text content of a single chunk.
-- **Arguments**:
-  - `--chunk-id <id>` (required): Database ID of the target chunk.
-  - `--output <path.json>` (required): Path to write the JSON chunk content.
-- **Output JSON Format**:
-  ```json
-  {
-    "chunk": {
-      "id": 123,
-      "document_id": 1,
-      "section_number": "3.2",
-      "title": "ACPI States",
-      "content": "Full markdown content of this section...",
-      "page_start": 45,
-      "file_path": "output/1/chunks/123_3.2_ACPI_States.md",
-      "document_name": "your-manual.pdf"
-    }
-  }
-  ```
+
+- **Arguments**: `--chunk-id <id>`, `--output <path.json>` (required)
+- **Output JSON**: full `chunk` object including `content` and `document_name`.
 
 ### `delete`
-- **Description**: Deletes the document from the database (cascading chunks) and deletes the physical files under `output/<doc_id>/` from disk.
-- **Arguments**:
-  - `--doc-id <id>` (required): Database ID of the document to delete.
-- **Stdout Output Format**:
-  `Success: Document 'your-manual.pdf' (ID: 1) and all its associated chunks have been deleted.`
+
+- **Arguments**: `--doc-id <id>` (required)
+- **Stdout**: success message; removes DB rows (cascade) and `output/<id>/`.
 
 ### `tag`
-- **Description**: Assigns or updates tags for a specific document, updating `output/global_catalog.md`.
-- **Arguments**:
-  - `--doc-id <id>` (required): Database ID of the document.
-  - `--tags "<comma-separated-tags>"` (required): Comma-separated list of tags to assign.
-- **Stdout Output Format**:
-  `Success: Tags for document ID 1 set to: tag1, tag2`
+
+- **Arguments**: `--doc-id <id>`, `--tags "..."` (required)
+- **Stdout**: confirmation; regenerates `output/global_catalog.md`.
 
 ---
 
-## Token Economics
+## Token economics
 
-- **Full 2,400-page spec**: ~4.5M tokens (too large/expensive for standard contexts).
-- **Targeted Search Retrieval (Top 5 Chunks)**: ~2.5K tokens (~1,800× compression).
-- **Targeted Chapter/Section Retrieval**: ~3K tokens (~50× compression).
+| Scenario | Rough tokens | Via this tool | Compression |
+| -------- | ------------ | ------------- | ----------- |
+| Full multi-thousand-page manual | millions | FTS top hits ~2–5K | ~10²–10³× |
+| Whole chapter | tens–hundreds of K | one section ~1–5K | ~10–50× |
+| Single topic lookup | full PDF otherwise | one chunk ~1–2K | high |
+
+Exact ratios depend on document length and retrieval strategy.
 
 ---
 
-## Troubleshooting & Common Mistakes
+## Troubleshooting
 
-- **Forgot `--output` Parameter**:
-  If the CLI fails with a missing output argument, re-run with `--output <some_temp_file.json>`.
-- **CWD Location Error**:
-  If `documents.db` is created in a subdirectory (like `scripts/`), delete the database file, change directory to the workspace root, and run the command again.
-- **Querying Special Characters**:
-  SQLite FTS5 syntax does not support raw special character queries. If a query fails, strip special characters or use a single keyword search to trigger the database's `LIKE` query fallback mechanism.
-- **Incorrect Python Environment**:
-  If modules like `fitz` or `docx` are missing, verify that dependencies are installed and that you are using the correct Python binary/virtual environment.
+- **Missing `--output`**: Re-run with `--output <file.json>` (except delete/tag).
+- **Wrong CWD**: Use workspace root or `--base-dir` so `documents.db` lands
+  in the expected place.
+- **FTS special characters**: Tokens are sanitised; if a query fails, use
+  simpler keywords (LIKE fallback may still apply).
+- **Missing modules (`fitz`, `docx`)**: Run `pip install -e .` in your active virtual environment. Because these heavy parser packages are lazily loaded, commands like `list`, `search`, `tag`, and `delete` will function without them. However, running `parse` on `.pdf` or `.docx` files will fail with a clear `ImportError` detailing the missing packages if they are not installed.
+- **Temporary directories not cleaned up**: All extraction-related temp folders are created under `<base-dir>/.doc_structuring_tmp` (e.g. `doc_structuring_docx_xxxxxx`) and are automatically deleted upon successful database commit.
+- **Domain-specific headers still polluting chunks**: add patterns via
+  `AppConfig.extra_ignore_patterns` or pre-filter with a custom extractor.
