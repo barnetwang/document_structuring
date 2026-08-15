@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual environments / tooling
+.venv/
+uv.lock.bak
+
+# doc-str runtime artifacts (never commit indexed data)
+documents.db
+output/
+parse_result.json
+search*.json
+toc.json
+embed_result.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
