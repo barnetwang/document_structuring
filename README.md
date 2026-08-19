@@ -8,7 +8,7 @@
 
 ---
 
-## 🌟 Key Architectural Features
+## Key Architectural Features
 
 ### Phase 1: TOC-First Workflow, Dynamic Token Budgeting & XML Grounding
 - **TOC-First Navigation**: Forces agents to inspect document Table of Contents before search, avoiding "Lost in the Middle" hallucination.
@@ -24,7 +24,7 @@
 - **0 VRAM CPU Inference**: Uses `fastembed` (`BAAI/bge-small-en-v1.5`, 384 dimensions) on CPU ONNX Runtime, keeping 100% GPU VRAM available for LLM inference (e.g. Qwen 27B).
 - **SQLite BLOB Vector Storage**: Stores L2-normalized float32 byte arrays in SQLite schema v6 (`chunk_embeddings`).
 - **Reciprocal Rank Fusion (RRF)**: Merges FTS5 BM25 keyword rankings ($r_{\text{fts}}$) and ONNX vector similarity ($r_{\text{vec}}$):
-  $$\text{RRF Score} = 0.6 \cdot \frac{1}{60 + r_{\text{fts}}} + 0.4 \cdot \frac{1}{60 + r_{\text{vec}}}$$
+ $$\text{RRF Score} = 0.6 \cdot \frac{1}{60 + r_{\text{fts}}} + 0.4 \cdot \frac{1}{60 + r_{\text{vec}}}$$
 
 ### Phase 4: Spec-to-Code Extractor (C/H Tree-sitter & EDK2 Config Parser)
 - **Tree-sitter C/H AST Parser**: Accurately extracts functions, typedef structs, unions, enums, macros, and preceding doc comments (`//` & `/* ... */`).
@@ -33,7 +33,7 @@
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Installation
 
@@ -48,7 +48,7 @@ This installs the `doc-str` CLI (entry point: `doc_structuring.cli:main`). Depen
 The repo doubles as an agent skill: copy (or symlink) this folder into your skills directory and install it editable in the agent's Python environment:
 
 ```bash
-cp -r document_structuring ~/.local/share/hermes/skills/doc-str   # or your profile's skills dir
+cp -r document_structuring ~/.local/share/hermes/skills/doc-str # or your profile's skills dir
 pip install -e <path-to>/doc-str
 ```
 
@@ -93,22 +93,22 @@ doc-str get-chunk --chunk-id 100 --include-neighbors --max-context-tokens 2000 -
 
 ---
 
-## 📂 Data Layout
+## Data Layout
 
 ```text
 <base_dir>/
-├── documents.db                 # SQLite DB (schema v6: metadata, FTS5, embeddings, code chunks)
+├── documents.db # SQLite DB (schema v6: metadata, FTS5, embeddings, code chunks)
 ├── output/
-│   ├── global_catalog.md        # Documents grouped by tags
-│   └── <document_id>/
-│       ├── toc.json
-│       ├── index.md
-│       └── chunks/*.md
+│ ├── global_catalog.md # Documents grouped by tags
+│ └── <document_id>/
+│ ├── toc.json
+│ ├── index.md
+│ └── chunks/*.md
 ```
 
 ---
 
-## 🧪 Testing
+## Testing
 
 A `dev` extra ships with pytest:
 
@@ -121,6 +121,6 @@ python -m pytest -v
 
 ---
 
-## 📜 License
+## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).

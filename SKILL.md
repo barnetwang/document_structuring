@@ -1,7 +1,7 @@
 ---
 name: doc-str
 description: "Use when parsing/searching PDF, DOCX, or C/EDK2 spec docs."
-version: 0.1.0
+version: 0.1.1
 author: Barnet Wang
 license: Apache-2.0
 ---

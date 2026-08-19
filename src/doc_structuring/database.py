@@ -49,14 +49,14 @@ _LABELS: dict[str, dict[str, str]] = {
         "diagrams_heading": "###### 圖表及包含文字 (Diagrams & Contained Text):",
         "image_bullet": "圖片",
         "contained_text": "包含文字",
-        "index_title": "# 📄 Document Knowledge Base",
+        "index_title": "# Document Knowledge Base",
         "index_intro": (
             "> 此目錄與文件區塊由自動化腳本生成，為後續 LLM 與 RAG 查詢使用。\n"
         ),
-        "dir_structure": "## 📁 Directory Structure",
-        "section_index": "## 🔗 Section Index",
+        "dir_structure": "## Directory Structure",
+        "section_index": "## Section Index",
         "image_link": "Image",
-        "catalog_title": "# 📚 全域知識庫目錄",
+        "catalog_title": "# 全域知識庫目錄",
         "catalog_intro": (
             "> 此目錄按標籤/分類整理所有已結構化的文件，"
             "供 LLM 與 RAG 代理快速檢索目錄，節省 Token 消耗。\n"
