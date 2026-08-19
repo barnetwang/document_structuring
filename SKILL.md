@@ -1,17 +1,9 @@
 ---
 name: doc-str
-description: >-
-  Parses long PDF/DOCX manuals, C/H source code, and EDK2 build configs (.inf, .dec, .dsc, .fdf)
-  into structured Markdown & AST chunks. Indexes them in SQLite with FTS5 and CPU ONNX vector
-  embeddings (fastembed BAAI/bge-small-en-v1.5) for RRF Hybrid Search, TOC-First browsing,
-  token-budgeted XML grounding, and Spec-to-Code cross-domain retrieval.
-  Use this skill whenever the user uploads or references large technical specs, BIOS manuals,
-  firmware codebases and wants to search, look up, summarize, or browse specific sections without
-  loading the entire document into context. Also use it when the user asks for a table of contents,
-  wants to list or manage previously parsed documents, needs to tag or delete an indexed document,
-  or wants to index/search C/H source code and EDK2 build configs — even if they don't explicitly
-  say "parse," "chunk," "index," or "SQLite." Do not read or extract text from large PDFs/DOCX files
-  directly with custom scripts — always route through this skill instead.
+description: "Use when parsing/searching PDF, DOCX, or C/EDK2 spec docs."
+version: 0.1.0
+author: Barnet Wang
+license: Apache-2.0
 ---
 
 # Document Structuring & Management
