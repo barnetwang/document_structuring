@@ -4,7 +4,7 @@
 
 `doc-str` is an enterprise-grade document structuring engine and LLM agent skill. It parses multi-thousand-page hardware specifications (PDF/DOCX), C/H firmware source code, and EDK2 build metadata (`.inf`, `.dec`, `.dsc`, `.fdf`), stores them in a unified SQLite database, and provides **TOC-First Agent Workflows**, **Reciprocal Rank Fusion (RRF) Hybrid Search**, **Token-Budgeted Context Truncation**, and **Spec-to-Code Cross-Domain XML Grounding**.
 
-本工具可將數千頁 PDF / Word 規格書、C/H 韌體原始碼與 EDK2 設定檔依結構切成 Markdown 與 AST 區塊，存入 SQLite（含 FTS5 全文檢索與 CPU ONNX 向量嵌入），並支援 RRF 混合檢索、TOC-First 檢索流程與動態 Token 預算 XML 封裝。專為 本地端 Qwen 27B / Antigravity / Hermes Agent 設計，防止 Context 爆炸與模型幻覺。
+本工具可將數千頁 PDF / Word 規格書、C/H 韌體原始碼與 EDK2 設定檔依結構切成 Markdown 與 AST 區塊，存入 SQLite（含 FTS5 全文檢索與 CPU ONNX 向量嵌入），並支援 RRF 混合檢索、TOC-First 檢索流程與動態 Token 預算 XML 封裝。適合搭配任何本地 LLM（如 Qwen 27B）或 agentic 編程環境使用，防止 Context 爆炸與模型幻覺。
 
 ---
 
@@ -47,16 +47,16 @@ This installs the `doc-str` CLI (entry point: `doc_structuring.cli:main`). Depen
 
 Note: `--mode hybrid` (the default) degrades silently to FTS-only, and `--mode vec` returns nothing, until you have run `doc-str embed --doc-id <id> ...` for that document. The CLI warns on stderr in both cases.
 
-### Use as a Hermes Agent Skill
+### Use as an Agent Skill (optional)
 
-The repo doubles as an agent skill: copy (or symlink) this folder into your skills directory and install it editable in the agent's Python environment:
+The repo doubles as an agent skill. Copy (or symlink) the folder into your agent's skills directory and install it editable in the agent's Python environment:
 
 ```bash
-cp -r document_structuring ~/.local/share/hermes/skills/doc-str # or your profile's skills dir
+cp -r document_structuring <your-skills-dir>/doc-str
 pip install -e <path-to>/doc-str
 ```
 
-`SKILL.md` drives the agent workflow (TOC-First → Hybrid Search → XML Grounding); `references/cli_spec.md` carries the full CLI reference.
+Skills-directory locations vary by agent (e.g. `~/.local/share/hermes/skills/` on Hermes Agent, `~/.claude/skills/` on Claude Code). `SKILL.md` drives the agent workflow (TOC-First → Hybrid Search → XML Grounding); `references/cli_spec.md` carries the full CLI reference.
 
 ### Data Directory
 

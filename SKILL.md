@@ -56,7 +56,7 @@ Examine section titles and structure to identify exact target `chunk_id`s.
 doc-str search --query "<keywords_or_phrase>" --mode hybrid --limit 5 --output <temp_search.json>
 ```
 - `--mode hybrid` (default): Reciprocal Rank Fusion, $0.6 \cdot (60 + r_{\text{fts}})^{-1} + 0.4 \cdot (60 + r_{\text{vec}})^{-1}$.
-- `--mode fts`: Exact BM25 keyword matching (useful for error codes or register names).
+- `--mode fts`: AND-tokenized BM25 keyword match (all keywords must hit a chunk; useful for error codes or register names).
 - `--mode vec`: Semantic vector similarity matching.
 - `--min-fts-rank <N>` (optional) — keep only chunks whose FTS5 rank is in the top N; chunks with no keyword match are dropped. Use it to suppress pure-vector noise in hybrid results.
 
