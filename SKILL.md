@@ -1,7 +1,7 @@
 ---
 name: doc-str
 description: "Use when parsing/searching PDF, DOCX, or C/EDK2 spec docs."
-version: 0.1.1
+version: 0.1.2
 author: Barnet Wang
 license: Apache-2.0
 ---
@@ -16,7 +16,7 @@ Use this skill to parse, index, search, and retrieve chunks of PDF/DOCX document
 - **Path formatting**: Prefer forward slashes `/` in paths passed to the CLI. On Windows (MSYS/git-bash), if `terminal()` mangles paths, fall back to `execute_code` with raw-string absolute paths — see [references/windows-path-workaround.md](references/windows-path-workaround.md).
 - **Required `--output`**: Except for `delete` and `tag`, always pass `--output <path.json>` so results are written as JSON.
 - **Use this tool only**: Parse and extract via `doc-str`. Do not write ad-hoc PDF or C parser scripts for the same task.
-- **Re-parse safety**: Re-parsing a file with the same filename replaces previous DB rows and `output/<id>/` tree automatically.
+- **Re-parse safety**: Re-parsing a *document* (`parse`) with the same filename replaces the previous DB rows and `output/<id>/` tree automatically. (`parse-code`, by contrast, appends — delete the code document before re-parsing if you want a clean replace.)
 - **Dependencies**: Uses `tree-sitter-c` for C/H AST parsing and `fastembed` for CPU ONNX vector embeddings.
 
 ## Primary Workflows
@@ -55,10 +55,10 @@ Examine section titles and structure to identify exact target `chunk_id`s.
 ```bash
 doc-str search --query "<keywords_or_phrase>" --mode hybrid --limit 5 --output <temp_search.json>
 ```
-- `--mode hybrid` (default): Reciprocal Rank Fusion ($0.6 \cdot \text{FTS} + 0.4 \cdot \text{Vector}$).
+- `--mode hybrid` (default): Reciprocal Rank Fusion, $0.6 \cdot (60 + r_{\text{fts}})^{-1} + 0.4 \cdot (60 + r_{\text{vec}})^{-1}$.
 - `--mode fts`: Exact BM25 keyword matching (useful for error codes or register names).
 - `--mode vec`: Semantic vector similarity matching.
-- `--min-fts-rank <N>`: Optional filter to enforce keyword precision and eliminate pure vector noise.
+- `--min-fts-rank <N>` (optional) — keep only chunks whose FTS5 rank is in the top N; chunks with no keyword match are dropped. Use it to suppress pure-vector noise in hybrid results.
 
 #### Step 3: Precise Chunk Retrieval & XML Grounding
 ```bash

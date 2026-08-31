@@ -38,10 +38,14 @@
 ### Installation
 
 ```bash
-pip install -e .
+pip install .
 ```
 
+For local development: `pip install -e .` (adds the `dev` extra when you write `pip install -e ".[dev]"`).
+
 This installs the `doc-str` CLI (entry point: `doc_structuring.cli:main`). Dependencies include `PyMuPDF`, `pymupdf4llm`, `python-docx`, `tree-sitter(-c)`, and `fastembed`. On first `embed` run, fastembed downloads the ~130 MB ONNX model (`BAAI/bge-small-en-v1.5`) into its cache directory — subsequent runs are offline.
+
+Note: `--mode hybrid` (the default) degrades silently to FTS-only, and `--mode vec` returns nothing, until you have run `doc-str embed --doc-id <id> ...` for that document. The CLI warns on stderr in both cases.
 
 ### Use as a Hermes Agent Skill
 
@@ -53,6 +57,10 @@ pip install -e <path-to>/doc-str
 ```
 
 `SKILL.md` drives the agent workflow (TOC-First → Hybrid Search → XML Grounding); `references/cli_spec.md` carries the full CLI reference.
+
+### Data Directory
+
+The CLI creates `documents.db` and an `output/` tree in the current working directory unless you pass `--base-dir <path>` (or set `DOC_STRUCTURING_BASE_DIR`). Keep the base dir stable between runs, or the index will not be found.
 
 ### CLI Usage Examples
 
@@ -110,14 +118,14 @@ doc-str get-chunk --chunk-id 100 --include-neighbors --max-context-tokens 2000 -
 
 ## Testing
 
-A `dev` extra ships with pytest:
+A small regression suite lives in [`tests/`](tests/). Install with the `dev` extra:
 
 ```bash
 pip install -e ".[dev]"
 python -m pytest -v
 ```
 
-(No test suite is committed yet — the package builds and runs cleanly against real PDF/DOCX/C inputs; see the Quick Start examples above for manual smoke tests.)
+CI runs the suite (plus a wheel build + `--help` smoke check) on Python 3.10 and 3.12 on every push to `main` and on pull requests. See `.github/workflows/tests.yml`.
 
 ---
 

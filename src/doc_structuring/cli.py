@@ -294,6 +294,12 @@ def handle_search(args: argparse.Namespace, config: AppConfig) -> None:
                 document_id=doc_id, config=config
             )
             if not embeddings_map:
+                logger.warning(
+                    "No embeddings found for %s, so vector search can return "
+                    "no results. Run 'doc-str embed --doc-id <id> --output "
+                    "<path>.json' first.",
+                    f"document {doc_id}" if doc_id is not None else "the database",
+                )
                 results = []
             else:
                 query_vec = generate_embeddings([args.query])[0]
@@ -485,7 +491,11 @@ def main() -> None:
         "--limit", type=int, default=10, help="Maximum number of search results to return"
     )
     p_search.add_argument(
-        "--min-fts-rank", type=int, default=None, help="Optional max FTS rank filter for RRF hybrid search"
+        "--min-fts-rank",
+        type=int,
+        default=None,
+        help="Keep only chunks whose FTS5 rank is in the top N; "
+        "chunks with no keyword match are dropped",
     )
 
     p_search.add_argument(

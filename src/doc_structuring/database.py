@@ -18,6 +18,10 @@ from .utils import sanitize_filename, section_sort_key
 
 logger = logging.getLogger(__name__)
 
+#: Document scopes for which the "no embeddings" warning was already emitted
+#: (per process). A warning per run, not per query.
+_VEC_WARNED: set[int | None] = set()
+
 SCHEMA_VERSION = 6
 
 
@@ -1249,6 +1253,18 @@ def hybrid_search(
     # 2. Vector Similarity Search
     vec_ranks: dict[int, int] = {}
     embeddings_map = get_document_embeddings(document_id=document_id, config=config)
+
+    if not embeddings_map:
+        if document_id not in _VEC_WARNED:
+            _VEC_WARNED.add(document_id)
+            scope = (f"document {document_id}" if document_id is not None
+                     else "the database")
+            logger.warning(
+                "No embeddings found for %s, so this hybrid search ran as "
+                "FTS-only. Run 'doc-str embed --doc-id <id> --output "
+                "<path>.json' first to enable the vector leg of RRF.",
+                scope,
+            )
 
     if embeddings_map:
         query_vec = generate_embeddings([query])[0]

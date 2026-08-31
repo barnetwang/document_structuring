@@ -81,7 +81,7 @@ doc-str [--base-dir PATH] [--locale en|zh] [-v|-vv] <command> ...
 - **Arguments**:
   - `--query <string>` (required)
   - `--mode <hybrid|fts|vec>` (optional, default: `hybrid`) — RRF Hybrid, BM25 Keyword, or Vector Similarity.
-  - `--min-fts-rank <N>` (optional) — Maximum FTS rank allowed into RRF consensus.
+  - `--min-fts-rank <N>` (optional) — keep only chunks whose FTS5 rank is in the top N; chunks with no keyword match are dropped.
   - `--limit <N>` (optional, default: 10)
   - `--doc-id <id>` (optional)
   - `--output <path.json>` (required)
