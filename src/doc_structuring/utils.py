@@ -12,6 +12,7 @@ def sanitize_filename(name: str) -> str:
     Strips Markdown decorators and replaces unsafe characters.
     """
     clean_name = name.replace('*', '').replace('#', '')
+    clean_name = re.sub(r'[\x00-\x1f\x7f]', '', clean_name)  # control chars (tab leaders) crash Windows file I/O
     return re.sub(r'[\\/*?:"<>|]', '', clean_name).replace(' ', '_')
 
 

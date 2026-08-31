@@ -93,7 +93,10 @@ DEFAULT_IGNORE_PATTERNS: list[re.Pattern[str]] = [
 DEFAULT_BAD_KEYWORDS = [
     "updated",
     "corrected",
-    "release",
+    # NOTE: bare "release" was dropped — it silently swallowed legitimate
+    # numbered sections like "5.5 Release Remediation" in TREC P-022.
+    # The phrase form is kept so revision tables are still skipped.
+    "release history",
     "initial nda",
     "revision history",
     "document revision",
@@ -183,22 +186,28 @@ def is_valid_heading(
     section_num: str,
     title: str,
     bad_keywords: Sequence[str] | None = None,
+    strict_major_range: bool = True,
 ) -> bool:
     """Decide whether a candidate heading is genuine.
 
     Applies several heuristics: major-number range, length cap,
     alphanumeric / CJK check, unit-only filter, leading-zero filter, and
     bad-keyword filter.
+
+    ``strict_major_range`` gates the VALID_MAJOR_RANGE check. It is relaxed
+    for headings the extractor explicitly marked with Markdown ``#``
+    (author-controlled Word styles): such titles are genuine section
+    headings even when vendor templates use numbers outside 1..99.
     """
+    if len(title) > 120:
+        return False
+
     try:
         major = int(section_num.split(".")[0])
     except Exception:
         return False
 
-    if major not in VALID_MAJOR_RANGE:
-        return False
-
-    if len(title) > 120:
+    if strict_major_range and major not in VALID_MAJOR_RANGE:
         return False
 
     # Letters (Latin), digits, or CJK ideographs
@@ -221,6 +230,141 @@ def is_valid_heading(
             return False
 
     return True
+
+
+# ---------------------------------------------------------------------------
+# Heading prepass (Markdown headings only)
+# ---------------------------------------------------------------------------
+#: Unnumbered headings that are navigation boilerplate, not sections.
+#: Checked only for unnumbered headings — an explicitly numbered
+#: "2. Table of Contents" section (rare, but legitimate) keeps its heading.
+_NAV_BOILERPLATE = {"table of contents"}
+
+
+def _unnumbered_viable(title: str, keywords: Sequence[str]) -> bool:
+    """Quick viability check for an unnumbered candidate heading."""
+    if title.lower() in _NAV_BOILERPLATE:
+        return False
+    return is_valid_heading("0", title, bad_keywords=keywords, strict_major_range=False)
+
+
+def _markdown_heading_prepass(
+    lines: list[tuple[int, str]],
+    bad_keywords: Sequence[str] | None = None,
+) -> dict[int, tuple[bool, str, str]]:
+    """Validate Markdown-marked headings and assign section numbers.
+
+    Runs in a dedicated pass (own tracker) BEFORE the main chunking loop.
+    Explicitly numbered headings are authoritative and re-synchronize the
+    tracker absolutely, which self-heals drift everywhere else.
+
+    Unnumbered headings (author-chosen Word styles / bold fallback — common
+    in vendor compliance templates whose front-matter H1s "Purpose",
+    "Scope" etc. carry no visible number) receive positionally generated
+    numbers in the document's own sequence, with a sub-series anchor:
+
+      * run  = maximal consecutive run of viable unnumbered headings at the
+               same heading level;
+      * anchor: if the FIRST explicitly numbered heading after the run sits
+               one level deeper (e.g. "3.1 Abbreviation" follows the run
+               [Purpose, Scope, Abbreviations and Definitions]), the run is
+               numbered so its LAST member becomes that parent major ("3"),
+               i.e. [1, 2, 3].  This recovers the template's implied
+               front-matter numbering without hardcoding it.
+
+    Navigation boilerplate (unnumbered "Table of Contents") and keyword/
+    length-invalid titles are rejected and never number anything.
+
+    Returns a plan keyed by line index: ``plan[idx] = (is_heading, number, title)``.
+    """
+    keywords = bad_keywords if bad_keywords is not None else DEFAULT_BAD_KEYWORDS
+
+    # --- phase 1: collect Markdown headings --------------------------------
+    entries: list[dict] = []
+    for idx, (_, raw) in enumerate(lines):
+        m = MD_HEADING_REGEX.match(raw.strip())
+        if not m:
+            continue
+        level = len(m.group(1))
+        title_text = m.group(2).strip()
+        title_text = re.sub(r"^[\*_#\s]+|[\*_#\s]+$", "", title_text).strip()
+        num_match = EXPLICIT_NUM_REGEX.match(title_text)
+        if num_match:
+            title = re.sub(
+                r"^[\*_#\s]+|[\*_#\s]+$", "", num_match.group(2) or "Overview"
+            ).strip()
+            entries.append({"idx": idx, "level": level,
+                            "explicit": num_match.group(1), "title": title})
+        else:
+            entries.append({"idx": idx, "level": level, "explicit": None,
+                            "title": title_text})
+
+    def _major(num: str) -> int:
+        try:
+            return int(num.split(".")[0])
+        except ValueError:
+            return 0
+
+    # --- phase 2: number in document order ---------------------------------
+    tracker = SectionNumberTracker()
+    last_explicit_major = 0
+    i, total = 0, len(entries)
+    while i < total:
+        e = entries[i]
+        if e["explicit"] is not None:
+            e["number"] = e["explicit"]
+            tracker.sync(e["explicit"])
+            last_explicit_major = max(last_explicit_major, _major(e["explicit"]))
+            i += 1
+            continue
+        if not _unnumbered_viable(e["title"], keywords):
+            e["rejected"] = True
+            i += 1
+            continue
+        # Maximal run of consecutive viable unnumbered headings, same level.
+        j = i
+        while (j + 1 < total and entries[j + 1]["explicit"] is None
+               and entries[j + 1]["level"] == e["level"]
+               and _unnumbered_viable(entries[j + 1]["title"], keywords)):
+            j += 1
+        run = entries[i:j + 1]
+
+        # Look ahead for the first explicit heading to derive an anchor.
+        anchor_parent: int | None = None
+        for g in entries[j + 1:]:
+            if g["explicit"] is not None:
+                if g["level"] == e["level"] + 1:
+                    p = _major(g["explicit"])
+                    if p > last_explicit_major and p >= len(run):
+                        anchor_parent = p
+                break
+            if g["level"] <= e["level"]:
+                break  # next same-level run starts; no anchor for this run
+
+        if anchor_parent is not None:
+            for k, g in enumerate(run):
+                g["number"] = str(anchor_parent - (len(run) - 1 - k))
+                tracker.sync(g["number"])
+        else:
+            for g in run:
+                g["number"] = tracker.generate(g["level"])
+                tracker.sync(g["number"])
+        i = j + 1
+
+    # --- phase 3: final validity + plan ------------------------------------
+    plan: dict[int, tuple[bool, str, str]] = {}
+    seen_major = 0
+    for e in entries:
+        number = e.get("number")
+        ok = False
+        if number is not None and not e.get("rejected"):
+            ok = (is_valid_heading(number, e["title"], bad_keywords=keywords,
+                                   strict_major_range=False)
+                  and _major(number) >= seen_major)
+            if ok:
+                seen_major = max(seen_major, _major(number))
+        plan[e["idx"]] = (ok, number or "0", e["title"])
+    return plan
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +393,12 @@ def parse_into_chunks(
     tracker = SectionNumberTracker()
     keywords = bad_keywords if bad_keywords is not None else DEFAULT_BAD_KEYWORDS
 
-    for page_num, line in lines:
+    # One-pass prevalidation of Markdown headings (handles unnumbered
+    # vendor-template headings and Annex number drift — see
+    # _markdown_heading_prepass).
+    md_plan = _markdown_heading_prepass(lines, bad_keywords=bad_keywords)
+
+    for line_idx, (page_num, line) in enumerate(lines):
         clean_line = line.strip()
 
         is_heading = False
@@ -258,23 +407,12 @@ def parse_into_chunks(
 
         md_match = MD_HEADING_REGEX.match(clean_line)
         if md_match:
-            level = len(md_match.group(1))
-            title_text = md_match.group(2).strip()
-            title_text = re.sub(r"^[\*_#\s]+|[\*_#\s]+$", "", title_text).strip()
-
-            num_match = EXPLICIT_NUM_REGEX.match(title_text)
-            if num_match:
-                section_num = num_match.group(1)
-                title = num_match.group(2) or "Overview"
-                title = re.sub(r"^[\*_#\s]+|[\*_#\s]+$", "", title).strip()
-                if is_valid_heading(section_num, title, bad_keywords=keywords):
-                    tracker.sync(section_num)
-                    is_heading = True
-            else:
-                title = title_text
-                section_num = tracker.generate(level)
-                if is_valid_heading(section_num, title, bad_keywords=keywords):
-                    is_heading = True
+            entry = md_plan.get(line_idx)
+            if entry is not None and entry[0]:
+                is_heading = True
+                section_num = entry[1]
+                title = entry[2]
+                tracker.sync(section_num)
         else:
             num_match = EXPLICIT_NUM_REGEX.match(clean_line)
             if num_match:

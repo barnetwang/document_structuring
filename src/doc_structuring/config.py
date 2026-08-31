@@ -35,7 +35,10 @@ def _default_bad_heading_keywords() -> list[str]:
     return [
         "updated",
         "corrected",
-        "release",
+        # NOTE: bare "release" was dropped — it silently swallowed legitimate
+        # numbered sections like "5.5 Release Remediation" in TREC P-022.
+        # The phrase form is kept so revision tables are still skipped.
+        "release history",
         "initial nda",
         "revision history",
         "document revision",
