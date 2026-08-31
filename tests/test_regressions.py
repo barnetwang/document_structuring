@@ -186,11 +186,29 @@ def test_delete_cascades_tags_and_rows(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_version_matches_pyproject():
+    """Version single source of truth: __init__.py defines __version__,
+    and pyproject.toml must take it dynamically (no duplicate literal)."""
     import re
     import pathlib
 
     root = pathlib.Path(__file__).resolve().parent.parent
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
-    m = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE)
-    assert m, "pyproject.toml missing static version"
-    assert m.group(1) == __version__ == "0.1.2"
+    init_src = (root / "src" / "doc_structuring" / "__init__.py").read_text(
+        encoding="utf-8"
+    )
+
+    m = re.search(r'^__version__\s*=\s*"([^"]+)"', init_src, re.MULTILINE)
+    assert m, "__init__.py missing __version__"
+    assert re.fullmatch(r"\d+\.\d+\.\d+.*", m.group(1)), f"not semver-ish: {m.group(1)}"
+
+    # pyproject must source version dynamically from __init__.py ...
+    assert re.search(r'^dynamic\s*=\s*\["version"\]', pyproject, re.MULTILINE), (
+        "pyproject.toml must declare version as dynamic"
+    )
+    # ... and no stale hardcoded version remains.
+    assert not re.search(r'^version\s*=\s*"', pyproject, re.MULTILINE), (
+        "pyproject.toml still hardcodes version (single-source broken)"
+    )
+
+    # and the runtime value agrees with the file.
+    assert __version__ == m.group(1)

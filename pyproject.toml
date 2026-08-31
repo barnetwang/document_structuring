@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "doc-structuring"
-version = "0.1.2"
+dynamic = ["version"]
 description = "RAG document parser: slice PDF/DOCX into structured, searchable chunks"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
@@ -28,6 +28,9 @@ dev = [
 [project.scripts]
 doc-str = "doc_structuring.cli:main"
 
+
+[tool.hatch.version]
+path = "src/doc_structuring/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/doc_structuring"]
