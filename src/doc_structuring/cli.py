@@ -305,24 +305,34 @@ def handle_search(args: argparse.Namespace, config: AppConfig) -> None:
         doc_id = getattr(args, "doc_id", None)
         top_k = getattr(args, "limit", 10)
         min_fts_rank = getattr(args, "min_fts_rank", None)
+        # F04: comma-separated tag filter, AND semantics (a document must
+        # carry every listed tag).  Empty/whitespace-only entries dropped.
+        tags_raw = getattr(args, "tags", None) or ""
+        tag_filter = [t.strip() for t in tags_raw.split(",") if t.strip()] or None
 
         if mode == "fts":
             results = database.search_chunks(
-                args.query, document_id=doc_id, limit=top_k, config=config
+                args.query, document_id=doc_id, limit=top_k, config=config,
+                tag_filter=tag_filter,
             )
         elif mode == "vec":
             from .embeddings import generate_embeddings
             import numpy as np
 
             embeddings_map = database.get_document_embeddings(
-                document_id=doc_id, config=config
+                document_id=doc_id, config=config, tag_filter=tag_filter
             )
             if not embeddings_map:
+                scope_desc = (
+                    f"document {doc_id}" if doc_id is not None
+                    else (f"tags [{', '.join(tag_filter)}]" if tag_filter
+                          else "the database")
+                )
                 logger.warning(
                     "No embeddings found for %s, so vector search can return "
                     "no results. Run 'doc-str embed --doc-id <id> --output "
                     "<path>.json' first.",
-                    f"document {doc_id}" if doc_id is not None else "the database",
+                    scope_desc,
                 )
                 results = []
             else:
@@ -339,7 +349,8 @@ def handle_search(args: argparse.Namespace, config: AppConfig) -> None:
                         results.append(chk)
         else:
             results = database.hybrid_search(
-                args.query, document_id=doc_id, top_k=top_k, min_fts_rank=min_fts_rank, config=config
+                args.query, document_id=doc_id, top_k=top_k, min_fts_rank=min_fts_rank,
+                config=config, tag_filter=tag_filter,
             )
 
         _write_json_output({"results": results, "mode": mode}, args.output)
@@ -524,6 +535,14 @@ def main() -> None:
 
     p_search.add_argument(
         "--doc-id", type=int, help="Optional document ID to scope search"
+    )
+    p_search.add_argument(
+        "--tags",
+        help=(
+            "Optional comma-separated tag filter (F04): only documents "
+            "carrying ALL of the listed tags are searched. Case-insensitive, "
+            "e.g. --tags amd,agesa"
+        ),
     )
     p_search.add_argument(
         "--output", required=True, help="Path to write the JSON search results"

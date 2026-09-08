@@ -965,21 +965,88 @@ def get_chunk_with_neighbors(
 
 
 
+def _document_ids_for_tags(
+    tag_filter: list[str],
+    config: AppConfig | None = None,
+) -> list[int] | None:
+    """Resolve a tag filter to the documents carrying ALL of the tags.
+
+    Multiple tags use AND semantics (a document must have every listed tag).
+    Comparison is case-insensitive and whitespace-tolerant, matching how
+    tags are stored verbatim after ``strip``.
+
+    Returns:
+        ``None``     — filter is empty/whitespace: no constraint applied.
+        ``[]``       — filter is non-empty but no document matches:
+                       callers must return no results.
+        ``list[int]`` — matching document ids (unsorted, from the query).
+    """
+    if config is None:
+        config = AppConfig()
+
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for raw in tag_filter or []:
+        t = (raw or "").strip().lower()
+        if t and t not in seen:
+            seen.add(t)
+            uniq.append(t)
+    if not uniq:
+        return None
+
+    placeholders = ", ".join("?" for _ in uniq)
+    tag_sql = (
+        "SELECT document_id FROM document_tags "
+        f"WHERE LOWER(tag) IN ({placeholders}) "
+        "GROUP BY document_id "
+        "HAVING COUNT(DISTINCT LOWER(tag)) = ?"
+    )
+    with get_db(config.db_path) as conn:
+        rows = conn.execute(
+            tag_sql, [t for t in uniq] + [len(uniq)]
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
+def _append_tag_scope(
+    doc_ids: list[int] | None,
+) -> tuple[str, list[int]]:
+    """Build the ``document_id IN (...)`` suffix for a resolved id list.
+
+    ``None`` (no constraint) yields an empty clause.  Callers must handle
+    the empty-list case themselves (return no results).
+    """
+    if not doc_ids:
+        return "", []
+    placeholders = ", ".join("?" for _ in doc_ids)
+    return f" AND c.document_id IN ({placeholders})", list(doc_ids)
+
+
 def search_chunks(
     query: str,
     document_id: int | None = None,
     config: AppConfig | None = None,
     limit: int | None = None,
+    tag_filter: list[str] | None = None,
 ) -> list[dict]:
     """Search for keywords in chunk titles and contents using FTS5 with LIKE fallback.
 
     Each keyword is sanitised via :func:`_fts5_escape_token` before being
     passed to the FTS5 MATCH clause to prevent query-syntax injection.
+
+    ``tag_filter`` (F04) restricts results to documents carrying ALL of the
+    listed tags (case-insensitive, AND semantics).
     """
     if config is None:
         config = AppConfig()
 
     init_db(config)
+
+    tag_doc_ids = (
+        _document_ids_for_tags(tag_filter, config) if tag_filter else None
+    )
+    if tag_doc_ids is not None and not tag_doc_ids:
+        return []
 
     # Split query by spaces, sanitise each token, and filter empties
     raw_keywords = [k.strip() for k in query.split() if k.strip()]
@@ -992,6 +1059,8 @@ def search_chunks(
         return []
 
     fts_query = " AND ".join(safe_keywords)
+
+    tag_clause, tag_params = _append_tag_scope(tag_doc_ids)
 
     sql = """
         SELECT c.id, c.document_id, c.section_number, c.title,
@@ -1008,6 +1077,8 @@ def search_chunks(
     if document_id is not None:
         sql += " AND c.document_id = ?"
         params.append(document_id)
+    sql += tag_clause
+    params.extend(tag_params)
 
     max_limit = limit if limit is not None else max(1, int(config.search_limit))
     # Order by FTS5 BM25 relevance (lower score = better match) with a
@@ -1043,6 +1114,8 @@ def search_chunks(
             if document_id is not None:
                 sql_fallback += " AND c.document_id = ?"
                 params_fallback.append(document_id)
+            sql_fallback += tag_clause
+            params_fallback.extend(tag_params)
 
             sql_fallback += (
                 " ORDER BY d.upload_time DESC, c.section_number ASC LIMIT ?"
@@ -1278,14 +1351,23 @@ def save_embeddings(
 def get_document_embeddings(
     document_id: int | None = None,
     config: AppConfig | None = None,
+    tag_filter: list[str] | None = None,
 ) -> dict[int, np.ndarray]:
-    """Retrieve stored chunk float32 embeddings for a document (or all documents)."""
+    """Retrieve stored chunk float32 embeddings for a document (or all documents).
+
+    ``tag_filter`` (F04) restricts the vector candidate set to chunks whose
+    document carries ALL of the listed tags (case-insensitive, AND semantics).
+    """
     import numpy as np
 
     if config is None:
         config = AppConfig()
 
     init_db(config)
+
+    tag_doc_ids = (
+        _document_ids_for_tags(tag_filter, config) if tag_filter else None
+    )
 
     with get_db(config.db_path) as conn:
         cursor = conn.cursor()
@@ -1298,6 +1380,19 @@ def get_document_embeddings(
                 WHERE c.document_id = ?
             """,
                 (document_id,),
+            )
+        elif tag_doc_ids is not None:
+            if not tag_doc_ids:
+                return {}
+            placeholders = ", ".join("?" for _ in tag_doc_ids)
+            cursor.execute(
+                f"""
+                SELECT e.chunk_id, e.embedding
+                FROM chunk_embeddings e
+                JOIN chunks c ON e.chunk_id = c.id
+                WHERE c.document_id IN ({placeholders})
+            """,
+                list(tag_doc_ids),
             )
         else:
             cursor.execute("SELECT chunk_id, embedding FROM chunk_embeddings")
@@ -1376,21 +1471,40 @@ def hybrid_search(
     rrf_k: int = 60,
     min_fts_rank: int | None = None,
     config: AppConfig | None = None,
+    tag_filter: list[str] | None = None,
 ) -> list[dict]:
-    """Perform hybrid search combining FTS5 BM25 keyword search and fastembed vector similarity via RRF."""
+    """Perform hybrid search combining FTS5 BM25 keyword search and fastembed vector similarity via RRF.
+
+    ``tag_filter`` (F04) is applied to BOTH legs — FTS candidates and the
+    vector candidate set — so the RRF union cannot reintroduce chunks from
+    documents outside the tag scope.
+    """
     import numpy as np
     from .embeddings import generate_embeddings
 
     if config is None:
         config = AppConfig()
 
+    # F04: a tag filter that matches no document means no results, without
+    # running the two search legs (and without a misleading "no embeddings"
+    # warning for a database that does have embeddings).
+    if tag_filter:
+        _ids = _document_ids_for_tags(tag_filter, config)
+        if _ids is not None and not _ids:
+            return []
+
     # 1. FTS5 Search (get top_k * 3 candidates)
-    fts_candidates = search_chunks(query, document_id=document_id, limit=top_k * 3, config=config)
+    fts_candidates = search_chunks(
+        query, document_id=document_id, limit=top_k * 3,
+        config=config, tag_filter=tag_filter,
+    )
     fts_ranks = {item["id"]: idx + 1 for idx, item in enumerate(fts_candidates)}
 
     # 2. Vector Similarity Search
     vec_ranks: dict[int, int] = {}
-    embeddings_map = get_document_embeddings(document_id=document_id, config=config)
+    embeddings_map = get_document_embeddings(
+        document_id=document_id, config=config, tag_filter=tag_filter
+    )
 
     if not embeddings_map:
         if document_id not in _VEC_WARNED:

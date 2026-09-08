@@ -48,7 +48,8 @@ What this provides:
    - Output JSON `"mode"` reports the **requested** mode. Without embeddings, hybrid silently degrades to FTS-only (warning on stderr only).
 6. **Budgeted retrieval**:
    ```bash
-   doc-str search --query "<phrase>" --mode <fts|hybrid> --limit 3 --output <temp_search.json>
+   doc-str search --query "<phrase>" --mode <fts|hybrid|vec> --limit 3 --tags <a,b> --output <temp_search.json>
+# --tags (optional, F04): restrict search to documents carrying ALL listed tags (AND, case-insensitive)
    doc-str get-chunk --chunk-id <id> --format xml --output <temp_chunk.xml>
    ```
    - `fts` results carry a ~150-char snippet (no full content); `hybrid`/`vec` results carry the **full** chunk content — keep `--limit` small.
@@ -65,7 +66,9 @@ doc-str embed --doc-id <id> --output <temp_embed.json>
 ```
 `parse-code` **appends** (fresh document each run) — delete the old code document before re-ingesting if you want a clean replace. `embed` recomputes every chunk in scope with no staleness check; re-run it after any re-parse of an embedded document.
 
-## Known Limitations (fixed: F01/F02 in 0.1.3, F07 in 0.1.4, F03 in 0.1.5 — 2026-09-08)
+## Known Limitations (fixed: F01/F02 in 0.1.3, F07 in 0.1.4, F03 in 0.1.5, F04 in 0.1.6 — 2026-09-08)
+
+- **Query scope** (fixed in 0.1.6): `search` accepts `--tags a,b` (AND semantics, case-insensitive) to restrict results to documents carrying ALL of the listed tags — applied to BOTH the FTS leg and the vector candidate set, so RRF fusion cannot reintroduce out-of-scope chunks. A tag list matching no document yields zero results (fail closed). Without `--tags`, search spans the whole database.
 
 - **FTS ordering** (fixed in 0.1.3): `search` results are now ordered by **BM25 relevance** (`bm25(chunks_fts)`, stable tie-breaker on chunk id); `--min-fts-rank <N>` (hybrid mode only) filters that same relevance-ordered rank. Punctuated terms are mapped to whitespace-split tokens (`PCI-Express` → `"PCI" "Express"`), so a query only matches what the document was actually tokenized into — an abbreviation (`PCI-E`) does not match the stored word `Express`.
 - **`--max-context-tokens` is not a hard output cap** (contract tightened in 0.1.3): it applies only with `--include-neighbors`; the target chunk is always returned in full and merely reduces the neighbor budget — a budget below the target's own estimate makes `get-chunk` fail closed with `ERROR_BUDGET_TOO_SMALL` instead of returning over-budget content. The metric is an estimate, not a tokenizer-exact count — never announce exact model token caps.

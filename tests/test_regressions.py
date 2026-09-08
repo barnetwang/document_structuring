@@ -758,6 +758,116 @@ def test_docx_extractor_emits_unknown_page(tmp_path):
 # version consistency
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# F04: tag-scoped search (--tags), AND semantics, applied to BOTH legs
+# ---------------------------------------------------------------------------
+
+def _seed_tagged(config, filename, tags):
+    from doc_structuring import database
+    database.init_db(config)
+    chunks = [
+        {"number": "1", "title": "Overview",
+         "content": "Shared word about ASPM power states.",
+         "page_start": 1, "source": filename},
+    ]
+    return database.save_document(filename, chunks, config=config, tags=tags)
+
+
+def test_tag_filter_single_tag(tmp_path):
+    config = _make_config(tmp_path)
+    from doc_structuring import database
+    amd_id = _seed_tagged(config, "amd_spec.pdf", ["amd", "spec"])
+    intel_id = _seed_tagged(config, "intel_spec.pdf", ["intel", "spec"])
+    assert intel_id != amd_id
+
+    # Single tag 'amd' must return only the amd document's chunk.
+    res = database.search_chunks("ASPM", tag_filter=["amd"], config=config)
+    assert res, "expected at least one amd-tagged result"
+    assert all(r["document_id"] == amd_id for r in res), res
+    assert any(r["document_name"] == "amd_spec.pdf" for r in res)
+
+    # Unscoped search returns both documents (proves the filter actually
+    # narrows, i.e. the baseline was not already single-document).
+    unscoped = database.search_chunks("ASPM", config=config)
+    assert {r["document_id"] for r in unscoped} == {amd_id, intel_id}
+
+
+def test_tag_filter_and_semantics(tmp_path):
+    config = _make_config(tmp_path)
+    from doc_structuring import database
+    doc_amd = _seed_tagged(config, "a.pdf", ["amd", "rap"])
+    _seed_tagged(config, "b.pdf", ["amd", "notrap"])
+    doc_intel_rap = _seed_tagged(config, "c.pdf", ["intel", "rap"])
+
+    # AND: both tags required -> only doc_amd (has amd + rap).
+    res = database.search_chunks(
+        "ASPM", tag_filter=["amd", "rap"], config=config
+    )
+    assert res
+    assert all(r["document_id"] == doc_amd for r in res), res
+
+    # Relaxation: tag 'rap' alone matches doc_amd AND c.pdf.
+    res2 = database.search_chunks("ASPM", tag_filter=["rap"], config=config)
+    assert {r["document_id"] for r in res2} == {doc_amd, doc_intel_rap}, res2
+
+
+def test_tag_filter_case_insensitive_and_no_match(tmp_path):
+    config = _make_config(tmp_path)
+    from doc_structuring import database
+    amd_id = _seed_tagged(config, "amd.pdf", ["AM", "D "])
+    # Case-insensitive + whitespace-tolerant match.
+    res = database.search_chunks("ASPM", tag_filter=["aM", "d"], config=config)
+    assert res and all(r["document_id"] == amd_id for r in res)
+
+    # No document carries tag 'nonexistent' -> empty result (not None, no
+    # results). Empty/whitespace filter list -> no constraint (None).
+    empty = database.search_chunks("ASPM", tag_filter=["nonexistent"], config=config)
+    assert empty == []
+    # Whitespace-only entries are dropped -> behaves as unscoped.
+    unscoped = database.search_chunks("ASPM", tag_filter=[" ", ""], config=config)
+    assert {r["document_id"] for r in unscoped} == {amd_id}
+
+
+def test_tag_filter_applies_to_vector_leg(tmp_path, monkeypatch):
+    """The RRF union must not reintroduce out-of-scope chunks: the vector
+    candidate set is narrowed by the same tag filter as the FTS leg."""
+    import numpy as np
+    config = _make_config(tmp_path)
+    from doc_structuring import database
+    amd_id = _seed_tagged(config, "amd.pdf", ["amd"])
+    intel_id = _seed_tagged(config, "intel.pdf", ["intel"])
+
+    # Get the two chunk ids (one chunk per seeded document) and write
+    # synthetic embeddings directly into the DB (no model needed).
+    amd_chunk = database.search_chunks("ASPM", document_id=amd_id, config=config)[0]["id"]
+    intel_chunk = database.search_chunks("ASPM", document_id=intel_id, config=config)[0]["id"]
+    dim = 4
+    database.save_embeddings(
+        {amd_chunk: np.ones(dim, dtype=np.float32),
+         intel_chunk: np.zeros(dim, dtype=np.float32)},
+        config=config,
+    )
+
+    # Fake fastembed: query vector aligned with the amd embedding
+    # (same dim=4 as the stored synthetic vectors).
+    monkeypatch.setattr(
+        "doc_structuring.embeddings.generate_embeddings",
+        lambda texts, *a, **k: [np.ones(dim, dtype=np.float32)],
+    )
+
+    res = database.hybrid_search(
+        "ASPM", tag_filter=["amd"], top_k=5, config=config
+    )
+    # Only the amd chunk may survive the fusion.
+    assert res, "expected at least one fused result"
+    assert all(r["id"] == amd_chunk or r["document_id"] == amd_id for r in res), res
+    assert intel_chunk not in {r["id"] for r in res}
+
+    # And the unscoped hybrid DOES surface the intel chunk (vec leg active).
+    unscoped = database.hybrid_search("ASPM", top_k=5, config=config)
+    assert intel_chunk in {r["id"] for r in unscoped}
+
+
 def test_version_matches_pyproject():
     """Version single source of truth: __init__.py defines __version__,
     and pyproject.toml must take it dynamically (no duplicate literal)."""

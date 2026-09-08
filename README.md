@@ -118,7 +118,9 @@ doc-str get-chunk --chunk-id 100 --include-neighbors --max-context-tokens 2000 -
 
 ## Known Limitations
 
-Fixed in **v0.1.3 / v0.1.4 / v0.1.5** (2026-09-08, from the 2026-09-08 code review): F01/F02 in 0.1.3, F07 in 0.1.4, F03 in 0.1.5.
+Fixed in **v0.1.3 / v0.1.4 / v0.1.5 / v0.1.6** (2026-09-08, from the 2026-09-08 code review): F01/F02 in 0.1.3, F07 in 0.1.4, F03 in 0.1.5, F04 in 0.1.6.
+
+- **Tag-scoped search** (new, 0.1.6): `search --tags a,b` restricts results to documents carrying ALL listed tags (AND, case-insensitive) — enforced on both the FTS and vector legs of hybrid search. No matching document → zero results.
 
 - **Search ordering** (fixed): FTS results are now ordered by FTS5 `bm25()` relevance (stable id tie-breaker); the FTS LIKE-fallback is capped by `config.search_limit`; `--min-fts-rank` filters that relevance rank (hybrid mode only).
 - **Punctuated query terms** (new contract, 0.1.3): query punctuation maps to whitespace (`PCI-Express` → `"PCI" "Express"`), matching how the `unicode61` tokenizer split the stored text. An abbreviation does not match a longer stored word (`PCI-E` ≠ `Express`).

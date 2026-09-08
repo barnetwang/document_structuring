@@ -7,7 +7,7 @@ import logging
 
 logging.getLogger(__name__).addHandler(logging.NullHandler())
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 
 from .config import AppConfig
 from .parser import parse_into_chunks
