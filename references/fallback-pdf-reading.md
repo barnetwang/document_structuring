@@ -32,3 +32,8 @@ print(result.stdout[:5000])  # first 5KB for preview
 2. Try `pdftotext` via `terminal()` for a quick preview.
 3. If full structured access is needed, use `doc-str parse` via `execute_code`.
 4. For one-off reads of short docs, the pdftotext output may be enough without indexing.
+
+## Boundaries
+- A preview is raw, unindexed content: it has no chunk ids, no TOC, and no reliable page locators.
+- Never present a preview outcome as a doc-str structured-index result, and never cite index locators (chunk id / DB page / DB section) for it.
+- If you answer from a preview, say so explicitly: "from a raw text preview, not from a structured index".

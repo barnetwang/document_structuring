@@ -43,6 +43,7 @@ doc-str [--base-dir PATH] [--locale en|zh] [-v|-vv] <command> ...
   - `--file <path>` (required)
   - `--tags "<comma-separated-tags>"` (optional)
   - `--output <path.json>` (required)
+- **Identity**: documents are keyed by **filename (basename)** only — re-parsing the same filename anywhere replaces the existing document. Old DB rows are deleted and the old `output/<id>/` tree removed *before* the new files are written; a failed new write can therefore leave the database and the filesystem out of sync.
 
 ### `parse-code`
 
@@ -50,6 +51,7 @@ doc-str [--base-dir PATH] [--locale en|zh] [-v|-vv] <command> ...
 - **Arguments**:
   - `--file <path>` (required)
   - `--output <path.json>` (required)
+- **Semantics**: **appends** a new document on every run (no replace semantics); delete the previous code document first for a clean replace.
 - **Output JSON**:
   ```json
   {
@@ -67,6 +69,7 @@ doc-str [--base-dir PATH] [--locale en|zh] [-v|-vv] <command> ...
 - **Arguments**:
   - `--doc-id <id>` (optional)
   - `--output <path.json>` (required)
+- **Semantics**: recomputes all chunks in scope on every run; there is no staleness or content-hash check. Re-run after any re-parse of an embedded document. The model is English-oriented — CJK semantic quality is unverified.
 
 ### `list`
 
@@ -80,18 +83,20 @@ doc-str [--base-dir PATH] [--locale en|zh] [-v|-vv] <command> ...
 
 - **Arguments**:
   - `--query <string>` (required)
-  - `--mode <hybrid|fts|vec>` (optional, default: `hybrid`) — RRF Hybrid, BM25 Keyword, or Vector Similarity.
-  - `--min-fts-rank <N>` (optional) — keep only chunks whose FTS5 rank is in the top N; chunks with no keyword match are dropped.
+  - `--mode <hybrid|fts|vec>` (optional, default: `hybrid`) — RRF hybrid, keyword, or vector similarity.
+  - `--min-fts-rank <N>` (optional, **hybrid mode only**) — keep only chunks among the FTS candidate positions 1..N; chunks with no keyword match are dropped. Note: the current FTS candidate list is ordered by document upload recency / section order, *not* by BM25 relevance, so "top N" is positional, not relevance-ranked.
   - `--limit <N>` (optional, default: 10)
   - `--doc-id <id>` (optional)
   - `--output <path.json>` (required)
+- **Result shapes**: `fts` returns metadata rows plus a ~150-char snippet (no full content); `hybrid`/`vec` return the **full** chunk content — keep `--limit` small.
+- **Mode transparency**: the output `"mode"` field reflects the *requested* mode. Without embeddings, hybrid silently degrades to FTS-only (warning on stderr only) and `vec` returns no results; an agent reading JSON only cannot otherwise tell which path actually ran.
 
 ### `get-chunk`
 
 - **Arguments**:
   - `--chunk-id <id>` (required)
   - `--include-neighbors` (optional) — include previous and next adjacent chunks if context budget permits.
-  - `--max-context-tokens <N>` (optional) — maximum total token budget for target chunk and neighbors.
+  - `--max-context-tokens <N>` (optional) — maximum total token **estimate** budget. Current semantics: the target chunk is always returned in full; the budget (minus a fixed XML-escape reserve) constrains only the neighbors. Without `--include-neighbors` the flag has no effect. The count is a lightweight estimate, not a tokenizer-exact token count — do not treat it as a hard model token cap.
   - `--format <json|xml>` (optional, default: `json`) — output format (`json` or `xml` grounding structure).
   - `--output <path>` (required)
 
