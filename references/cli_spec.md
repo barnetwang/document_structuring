@@ -43,7 +43,7 @@ doc-str [--base-dir PATH] [--locale en|zh] [-v|-vv] <command> ...
   - `--file <path>` (required)
   - `--tags "<comma-separated-tags>"` (optional)
   - `--output <path.json>` (required)
-- **Identity**: documents are keyed by **filename (basename)** only — re-parsing the same filename anywhere replaces the existing document. Old DB rows are deleted and the old `output/<id>/` tree removed *before* the new files are written; a failed new write can therefore leave the database and the filesystem out of sync.
+- **Identity**: documents are keyed by **filename (basename)** only — re-parsing the same filename anywhere replaces the existing document. **Atomic replacement (since 0.1.4)**: the new row + files are created and verified first; the previous version's rows are removed and committed in the same transaction. A failed re-parse rolls back and the previous version (rows, FTS, files) is fully intact. After any successful re-parse, verify with `list` + `toc` (chunk count, expected sections present).
 
 ### `parse-code`
 

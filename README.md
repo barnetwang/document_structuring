@@ -118,7 +118,7 @@ doc-str get-chunk --chunk-id 100 --include-neighbors --max-context-tokens 2000 -
 
 ## Known Limitations
 
-Fixed in **v0.1.3** (2026-09-08, F01/F02 from the 2026-09-08 code review):
+Fixed in **v0.1.3 / v0.1.4** (2026-09-08, from the 2026-09-08 code review): F01/F02 in 0.1.3, F07 in 0.1.4.
 
 - **Search ordering** (fixed): FTS results are now ordered by FTS5 `bm25()` relevance (stable id tie-breaker); the FTS LIKE-fallback is capped by `config.search_limit`; `--min-fts-rank` filters that relevance rank (hybrid mode only).
 - **Punctuated query terms** (new contract, 0.1.3): query punctuation maps to whitespace (`PCI-Express` → `"PCI" "Express"`), matching how the `unicode61` tokenizer split the stored text. An abbreviation does not match a longer stored word (`PCI-E` ≠ `Express`).
@@ -126,7 +126,7 @@ Fixed in **v0.1.3** (2026-09-08, F01/F02 from the 2026-09-08 code review):
 - **Page location**: PDF `page_start` is reliable only where headings match PDF bookmarks; DOCX page numbers are always the placeholder 1 (cite by section/symbol instead).
 - **Tables**: DOCX rendering escapes `|` oddly and deduplicates consecutive identical rows; the advertised PDF borderless fallback is not yet active.
 - **C/H extraction**: top-level symbols only; no `#if`-container or function-like-macro coverage; comment attachment is inconsistent.
-- **Document identity**: `parse` keys by filename basename (same-named files replace each other) and re-parse is destructive; ingestion is not safe to run concurrently.
+- **Document identity**: `parse` keys by filename basename (same-named files replace each other). Since 0.1.4 the replacement is **atomic**: new version is created and verified inside one transaction before the old rows are removed; a failed re-parse rolls back and the previous version is fully intact. Ingestion is not safe to run concurrently.
 - **Embeddings**: recomputed in full per run, no staleness check, English-oriented model.
 
 ---

@@ -345,11 +345,24 @@ def save_document(
 ) -> int:
     """Save document metadata and chunks, then write physical Markdown files.
 
-    Safety: commits DB INSERTs BEFORE writing physical files so that a
-    crash during file I/O cannot leave orphaned files with no DB reference.
+    Atomic replace semantics (0.1.3, hotfix for finding F07):
 
-    Uses ``executemany`` for the ``file_path`` UPDATE to eliminate the N+1
-    query pattern.
+    1. The new document row and chunk rows are inserted **with the
+       previous version still present** (FTS triggers fire
+       transactionally).
+    2. All physical files are written under ``output/<new_id>/``.
+    3. Chunk ``file_path`` values and tags are backfilled.
+    4. Only then is the previous version's rows removed (if any) and the
+       transaction committed in one step.
+    5. After the commit, best-effort maintenance runs: the old
+       ``output/<old_id>/`` tree, extractor scratch dirs, TOC/index
+       artifacts and the global catalog.
+
+    A failure at any pre-commit point rolls the whole transaction back,
+    leaving a previous version fully intact in both DB and files.  The
+    new version's partially written directory is removed.  The price is
+    that the DB write lock is held during file I/O, so ingestion must
+    remain serial per base-dir (already the documented contract).
     """
     if config is None:
         config = AppConfig()
@@ -361,8 +374,11 @@ def save_document(
     with get_db(config.db_path) as conn:
         cursor = conn.cursor()
 
+        # ---------------------------------------------------------------
+        # Step 1: record the previous version (if any); insert the new
+        # version.  Nothing is deleted yet.
+        # ---------------------------------------------------------------
         try:
-            # Check for duplicate document filename
             cursor.execute(
                 "SELECT id FROM documents WHERE filename = ?", (filename,)
             )
@@ -370,18 +386,13 @@ def save_document(
             if existing:
                 old_doc_id = existing['id']
                 logger.warning(
-                    "Document '%s' already exists (ID: %s). Deleting old copy.",
+                    "Document '%s' already exists (ID: %s). "
+                    "Replacing atomically: the old copy stays intact "
+                    "until the new content is verified and committed.",
                     filename,
                     old_doc_id,
                 )
-                cursor.execute(
-                    "DELETE FROM chunks WHERE document_id = ?", (old_doc_id,)
-                )
-                cursor.execute(
-                    "DELETE FROM documents WHERE id = ?", (old_doc_id,)
-                )
 
-            # Step 1: Insert document row
             upload_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             cursor.execute(
                 "INSERT INTO documents (filename, upload_time, chunk_count, status) "
@@ -392,7 +403,6 @@ def save_document(
 
             base_prefix = f"output/{document_id}/chunks/"
 
-            # Step 2: Batch INSERT all chunks with placeholder file_path
             if chunks:
                 from .parser import extract_cross_references
                 cursor.executemany(
@@ -419,148 +429,167 @@ def save_document(
                     ],
                 )
 
-
-
-            # Commit DB NOW before any file I/O (crash safety)
-            conn.commit()
-
-            # Save tags if provided
-            if tags:
-                cursor.executemany(
-                    "INSERT INTO document_tags (document_id, tag) VALUES (?, ?)",
-                    [(document_id, tag.strip()) for tag in tags if tag.strip()]
-                )
-                conn.commit()
-
             # Get ACTUAL rowids via sequential query (not predicted)
             cursor.execute(
                 "SELECT id FROM chunks WHERE document_id = ? ORDER BY id ASC",
                 (document_id,),
             )
             actual_ids = [r["id"] for r in cursor.fetchall()]
-
         except Exception:
             conn.rollback()
             raise
 
-    # Clean up old physical files (safe since DB commit succeeded)
+        # ---------------------------------------------------------------
+        # Steps 2-4: file I/O while the transaction is still open, then
+        # backfill + replace + a single commit.  Any failure here rolls
+        # back, so the previous version was never disturbed.
+        # ---------------------------------------------------------------
+        doc_dir = config.output_dir / str(document_id)
+        try:
+            # Step 3: Write physical files
+            doc_dir = config.output_dir / str(document_id)
+            chunks_dir = doc_dir / config.chunks_subdir
+            chunks_dir.mkdir(parents=True, exist_ok=True)
+
+            images_dir = doc_dir / "images"
+
+            toc_entries_list: list[dict] = []
+            update_pairs: list[tuple[str, int]] = []
+
+            image_pattern = re.compile(r'<!-- IMAGE: (\{.*?\}) -->')
+
+            for idx, chunk in enumerate(chunks):
+                if idx >= len(actual_ids):
+                    break  # safety guard
+                chunk_db_id = actual_ids[idx]
+                number = chunk["number"]
+                title = chunk["title"]
+                clean_title = sanitize_filename(title)
+                chunk_filename = f"{chunk_db_id}_{number}_{clean_title}.md"
+
+                chunk_images = []
+                chunk_content = chunk["content"]
+                img_seq = 1
+
+                def replace_image_placeholder(match):
+                    nonlocal img_seq
+                    meta_json = match.group(1)
+                    try:
+                        meta = json.loads(meta_json)
+                        temp_path = meta.get("temp_path")
+                        caption = meta.get("caption", f"Image {img_seq}")
+                        contained_text_list = meta.get("contained_text", [])
+
+                        if temp_path and os.path.exists(temp_path):
+                            images_dir.mkdir(parents=True, exist_ok=True)
+                            clean_number = sanitize_filename(number)
+                            img_name = f"{chunk_db_id}_{clean_number}_{img_seq}.png"
+                            dest_path = images_dir / img_name
+
+                            shutil.copy(temp_path, dest_path)
+                            try:
+                                os.remove(temp_path)
+                            except Exception:
+                                pass
+
+                            rel_img_path = f"images/{img_name}"
+                            chunk_images.append({
+                                "rel_path": rel_img_path,
+                                "abs_path": str(dest_path),
+                                "caption": caption,
+                                "contained_text": contained_text_list
+                            })
+
+                            img_seq += 1
+                            return f"\n![{caption}](../{rel_img_path})\n"
+                    except Exception as e:
+                        logger.error("Failed to parse image placeholder: %s", e)
+                    return match.group(0)
+
+                new_content = image_pattern.sub(replace_image_placeholder, chunk_content)
+
+                filepath = chunks_dir / chunk_filename
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(f"# {number} {title}\n\n")
+                    f.write("metadata:\n")
+                    f.write(f"- source file: {chunk.get('source', filename)}\n")
+                    f.write(f"- section number: {number}\n")
+                    f.write(f"- page start: {chunk['page_start']}\n")
+                    if chunk_images:
+                        f.write("- images:\n")
+                        for img in chunk_images:
+                            f.write(f"  - output/{document_id}/{img['rel_path']}\n")
+                    f.write("\n")
+                    f.write("content:\n")
+                    f.write(new_content)
+                    if chunk_images:
+                        lbl = _labels(config.locale)
+                        f.write(f"\n\n{lbl['diagrams_heading']}\n")
+                        for img in chunk_images:
+                            f.write(
+                                f"- **{lbl['image_bullet']}: {img['caption']}** "
+                                f"({img['rel_path']})\n"
+                            )
+                            if img["contained_text"]:
+                                words_str = ", ".join(
+                                    [w["text"] for w in img["contained_text"]]
+                                )
+                                f.write(f"  * {lbl['contained_text']}: {words_str}\n")
+
+                update_pairs.append((f"{base_prefix}{chunk_filename}", chunk_db_id))
+
+                if number != "0":
+                    entry = {
+                        "id": chunk_db_id,
+                        "section_number": number,
+                        "title": title,
+                        "file": chunk_filename,
+                        "page_start": chunk["page_start"],
+                    }
+                    if chunk_images:
+                        entry["images"] = [img["rel_path"] for img in chunk_images]
+                    toc_entries_list.append(entry)
+
+
+            if update_pairs:
+                cursor.executemany(
+                    "UPDATE chunks SET file_path = ? WHERE id = ?", update_pairs
+                )
+
+            if tags:
+                cursor.executemany(
+                    "INSERT INTO document_tags (document_id, tag) VALUES (?, ?)",
+                    [(document_id, tag.strip()) for tag in tags if tag.strip()],
+                )
+
+            # Now — and only now — drop the previous version, if any, and
+            # commit everything as one step: the previous rows (and their
+            # FTS entries, via the delete triggers) and the new content
+            # flip at the same instant.
+            if old_doc_id is not None:
+                cursor.execute(
+                    "DELETE FROM chunks WHERE document_id = ?", (old_doc_id,)
+                )
+                cursor.execute(
+                    "DELETE FROM documents WHERE id = ?", (old_doc_id,)
+                )
+
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            # Best effort: discard the partially written new version.
+            shutil.rmtree(doc_dir, ignore_errors=True)
+            raise
+
+    # ---------------------------------------------------------------
+    # Step 5: post-commit maintenance.  Failures here cannot corrupt the
+    # committed data; they leave at most stale artifacts behind.
+    # ---------------------------------------------------------------
     if old_doc_id is not None:
         old_doc_dir = config.output_dir / str(old_doc_id)
         if old_doc_dir.exists():
-            shutil.rmtree(old_doc_dir)
+            shutil.rmtree(old_doc_dir, ignore_errors=True)
 
-    # Step 3: Write physical files
-    doc_dir = config.output_dir / str(document_id)
-    chunks_dir = doc_dir / config.chunks_subdir
-    chunks_dir.mkdir(parents=True, exist_ok=True)
-
-    images_dir = doc_dir / "images"
-
-    toc_entries_list: list[dict] = []
-    update_pairs: list[tuple[str, int]] = []
-
-    image_pattern = re.compile(r'<!-- IMAGE: (\{.*?\}) -->')
-
-    for idx, chunk in enumerate(chunks):
-        if idx >= len(actual_ids):
-            break  # safety guard
-        chunk_db_id = actual_ids[idx]
-        number = chunk["number"]
-        title = chunk["title"]
-        clean_title = sanitize_filename(title)
-        chunk_filename = f"{chunk_db_id}_{number}_{clean_title}.md"
-
-        chunk_images = []
-        chunk_content = chunk["content"]
-        img_seq = 1
-
-        def replace_image_placeholder(match):
-            nonlocal img_seq
-            meta_json = match.group(1)
-            try:
-                meta = json.loads(meta_json)
-                temp_path = meta.get("temp_path")
-                caption = meta.get("caption", f"Image {img_seq}")
-                contained_text_list = meta.get("contained_text", [])
-
-                if temp_path and os.path.exists(temp_path):
-                    images_dir.mkdir(parents=True, exist_ok=True)
-                    clean_number = sanitize_filename(number)
-                    img_name = f"{chunk_db_id}_{clean_number}_{img_seq}.png"
-                    dest_path = images_dir / img_name
-
-                    shutil.copy(temp_path, dest_path)
-                    try:
-                        os.remove(temp_path)
-                    except Exception:
-                        pass
-
-                    rel_img_path = f"images/{img_name}"
-                    chunk_images.append({
-                        "rel_path": rel_img_path,
-                        "abs_path": str(dest_path),
-                        "caption": caption,
-                        "contained_text": contained_text_list
-                    })
-
-                    img_seq += 1
-                    return f"\n![{caption}](../{rel_img_path})\n"
-            except Exception as e:
-                logger.error("Failed to parse image placeholder: %s", e)
-            return match.group(0)
-
-        new_content = image_pattern.sub(replace_image_placeholder, chunk_content)
-
-        filepath = chunks_dir / chunk_filename
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(f"# {number} {title}\n\n")
-            f.write("metadata:\n")
-            f.write(f"- source file: {chunk.get('source', filename)}\n")
-            f.write(f"- section number: {number}\n")
-            f.write(f"- page start: {chunk['page_start']}\n")
-            if chunk_images:
-                f.write("- images:\n")
-                for img in chunk_images:
-                    f.write(f"  - output/{document_id}/{img['rel_path']}\n")
-            f.write("\n")
-            f.write("content:\n")
-            f.write(new_content)
-            if chunk_images:
-                lbl = _labels(config.locale)
-                f.write(f"\n\n{lbl['diagrams_heading']}\n")
-                for img in chunk_images:
-                    f.write(
-                        f"- **{lbl['image_bullet']}: {img['caption']}** "
-                        f"({img['rel_path']})\n"
-                    )
-                    if img["contained_text"]:
-                        words_str = ", ".join(
-                            [w["text"] for w in img["contained_text"]]
-                        )
-                        f.write(f"  * {lbl['contained_text']}: {words_str}\n")
-
-        update_pairs.append((f"{base_prefix}{chunk_filename}", chunk_db_id))
-
-        if number != "0":
-            entry = {
-                "id": chunk_db_id,
-                "section_number": number,
-                "title": title,
-                "file": chunk_filename,
-                "page_start": chunk["page_start"],
-            }
-            if chunk_images:
-                entry["images"] = [img["rel_path"] for img in chunk_images]
-            toc_entries_list.append(entry)
-
-    # Batch UPDATE all file_path values in one call (N+1 fix)
-    with get_db(config.db_path) as conn:
-        conn.executemany(
-            "UPDATE chunks SET file_path = ? WHERE id = ?", update_pairs
-        )
-        conn.commit()
-
-    # Step 4: Write toc.json and index.md
     with open(doc_dir / "toc.json", "w", encoding="utf-8") as f:
         json.dump(toc_entries_list, f, indent=2, ensure_ascii=False)
 

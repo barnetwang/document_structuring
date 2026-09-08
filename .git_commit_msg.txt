@@ -1,0 +1,27 @@
+PR-02 (hotfix): atomic re-parse in save_document (F07, 0.1.4)
+
+save_document previously deleted the old rows first and committed
+BEFORE writing the new physical files: a failed file write left the
+document replaced in the DB but missing on disk.
+
+New order, single transaction:
+1. insert new document + chunk rows (previous version still present;
+   FTS triggers fire transactionally)
+2. write all physical files under output/<new_id>/
+3. backfill chunk file_paths + tags
+4. delete previous version rows and commit in one step
+5. post-commit best-effort maintenance: old output tree, extractor
+   scratch dirs, TOC/index, global catalog
+
+Failure anywhere pre-commit => rollback (previous version fully
+intact in DB, FTS and files) + removal of the partial new tree.
+
+Cost accepted: the DB write lock is now held during file I/O, so
+ingestion stays serial per base-dir (already the documented
+contract in SKILL.md).
+
+Tests 17 -> 20: failed-rewrite rollback (monkeypatched open),
+atomic swap happy path, tags following the new version.
+
+Docs: SKILL.md / cli_spec / README — the destructive-reparse
+contract is replaced by the atomic-replace one.

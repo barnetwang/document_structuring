@@ -392,6 +392,162 @@ def test_budget_too_small_for_target_is_reported(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# SQLite: F07 atomic replace (save_document)
+# ---------------------------------------------------------------------------
+
+def _seed_small_document(config, filename="f07.pdf", marker="f07old"):
+    from doc_structuring import database
+    return database.save_document(filename, [
+        {"number": "1", "title": "Old Section",
+         "content": f"The {marker} body for the first revision.",
+         "page_start": 1, "source": filename},
+    ], config=config)
+
+
+def test_failed_rewrite_keeps_previous_version(tmp_path, monkeypatch):
+    """F07 regression: a failure while writing the NEW version's files must
+    roll the whole transaction back — the previous version's rows, FTS
+    entries, and files stay fully intact, and the half-written new
+    output tree is removed."""
+    import doc_structuring.database as database
+    import builtins as _builtins
+    real_open = _builtins.open
+
+    config = _make_config(tmp_path)
+    old_id = _seed_small_document(config)
+
+    failed = {"flag": False}
+
+    def fake_open(path, mode="r", *args, **kwargs):
+        # Fail the first write of the rewrite (any file write of the new
+        # version) and let everything else through.
+        if "w" in str(mode) and "output" in str(path):
+            if not failed["flag"]:
+                failed["flag"] = True
+                raise OSError("simulated disk failure during rewrite")
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(_builtins, "open", fake_open)
+
+    with pytest.raises(OSError, match="simulated disk failure"):
+        database.save_document("f07.pdf", [
+            {"number": "1", "title": "New Section",
+             "content": "The completely different new body.",
+             "page_start": 1, "source": "f07.pdf"},
+        ], config=config)
+
+    # Previous version must be fully intact in the DB.
+    conn = sqlite3.connect(str(config.db_path))
+    conn.row_factory = sqlite3.Row
+    docs = [dict(r) for r in conn.execute(
+        "SELECT id, filename, status FROM documents")]
+    assert len(docs) == 1, f"expected exactly the old doc, got {docs}"
+    assert docs[0]["id"] == old_id
+    assert docs[0]["status"] == "success"
+
+    # Old FTS entry for the old body must still be searchable.
+    n = conn.execute(
+        "SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH 'f07old'"
+    ).fetchone()[0]
+    # The new (rolled-back) insert must have left no FTS trace.
+    n_new = conn.execute(
+        "SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH 'completely'"
+    ).fetchone()[0]
+    conn.close()
+    assert n >= 1, "old FTS entry lost by the rollback"
+    assert n_new == 0, "rolled-back insert left FTS garbage"
+
+    # Old physical files intact; no half-written new output tree remains.
+    out = config.output_dir
+    old_dir = out / str(old_id)
+    assert old_dir.is_dir() and any(old_dir.rglob("*.md")), \
+        "previous version's files were damaged"
+    stray = [p.name for p in out.iterdir()
+             if p.is_dir() and p.name.isdigit() and int(p.name) != old_id]
+    assert stray == [], f"partial new-version tree left behind: {stray}"
+
+    # And a normal re-run afterwards must succeed (no lock damage).
+    monkeypatch.setattr(_builtins, "open", real_open)
+    new_id = database.save_document("f07.pdf", [
+        {"number": "1", "title": "New Section",
+         "content": "The completely different new body.",
+         "page_start": 1, "source": "f07.pdf"},
+    ], config=config)
+    assert new_id != old_id
+    # old version is now (post-commit) cleaned up
+    assert not (out / str(old_id)).exists(), "old output tree not removed"
+    conn = sqlite3.connect(str(config.db_path))
+    n_docs = conn.execute("SELECT count(*) FROM documents").fetchone()[0]
+    conn.close()
+    assert n_docs == 1
+
+
+def test_rewrite_is_atomic_swap(tmp_path):
+    """F07 happy path: on success the old rows AND files are replaced,
+    no duplicate filename row survives, and new content is searchable."""
+    import doc_structuring.database as database
+
+    config = _make_config(tmp_path)
+    old_id = _seed_small_document(config)
+
+    new_id = database.save_document("f07.pdf", [
+        {"number": "1", "title": "New Section",
+         "content": "The atomic replacement body.",
+         "page_start": 1, "source": "f07.pdf"},
+    ], config=config)
+
+    assert new_id != old_id
+    conn = sqlite3.connect(str(config.db_path))
+    conn.row_factory = sqlite3.Row
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, filename FROM documents WHERE filename = 'f07.pdf'")]
+    assert [r["id"] for r in rows] == [new_id], \
+        f"old doc row survived the atomic swap: {rows}"
+    n_new = conn.execute(
+        "SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH 'atomic'"
+    ).fetchone()[0]
+    n_old = conn.execute(
+        "SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH 'first'"
+    ).fetchone()[0]
+    conn.close()
+    assert n_new == 1
+    assert n_old == 0, "old FTS entry survived the swap"
+
+    out = config.output_dir
+    assert not (out / str(old_id)).exists()
+    assert (out / str(new_id) / "toc.json").is_file()
+    # new chunk file exists on disk with a real (non-placeholder) file_path
+    rows = database.search_chunks("atomic", config=config)
+    assert rows and rows[0]["document_id"] == new_id
+
+
+def test_rewrite_tags_follow_new_version(tmp_path):
+    """F07: tags attached to the re-parse apply to the NEW document row,
+    not lost on the rolled/deleted old one."""
+    import doc_structuring.database as database
+
+    config = _make_config(tmp_path)
+    old_id = _seed_small_document(config, marker="f07tagold")
+    new_id = database.save_document("f07.pdf", [
+        {"number": "1", "title": "New Section",
+         "content": "The tagged re-parse body.",
+         "page_start": 1, "source": "f07.pdf"},
+    ], config=config, tags=["demo", "amd"])
+
+    conn = sqlite3.connect(str(config.db_path))
+    conn.row_factory = sqlite3.Row
+    tags = [r["tag"] for r in conn.execute(
+        "SELECT tag FROM document_tags WHERE document_id = ? ORDER BY tag",
+        (new_id,))]
+    n = conn.execute(
+        "SELECT count(*) FROM document_tags WHERE document_id = ?",
+        (old_id,)).fetchone()[0]
+    conn.close()
+    assert sorted(tags) == ["amd", "demo"]
+    assert n == 0, "tags should not linger on the deleted old doc"
+
+
+# ---------------------------------------------------------------------------
 # version consistency
 # ---------------------------------------------------------------------------
 
