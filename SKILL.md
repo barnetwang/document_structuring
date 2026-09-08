@@ -65,10 +65,10 @@ doc-str embed --doc-id <id> --output <temp_embed.json>
 ```
 `parse-code` **appends** (fresh document each run) — delete the old code document before re-ingesting if you want a clean replace. `embed` recomputes every chunk in scope with no staleness check; re-run it after any re-parse of an embedded document.
 
-## Known Limitations (verified at 0.1.2 @ 5d9d06a)
+## Known Limitations (F01/F02 fixed in 0.1.3 @ 2026-09-08)
 
-- **FTS ordering is not BM25 relevance**: `search` results are ordered by document upload recency, then section; `--min-fts-rank <N>` filters that *position* (and only applies in `--mode hybrid`). Treat top ranks as "recent matches" until true BM25 ordering lands.
-- **`--max-context-tokens` is not a hard output cap**: it applies only with `--include-neighbors`; the target chunk is always returned in full and merely reduces the neighbor budget. The metric is an estimate, not a tokenizer-exact count — never announce exact model token caps.
+- **FTS ordering** (fixed in 0.1.3): `search` results are now ordered by **BM25 relevance** (`bm25(chunks_fts)`, stable tie-breaker on chunk id); `--min-fts-rank <N>` (hybrid mode only) filters that same relevance-ordered rank. Punctuated terms are mapped to whitespace-split tokens (`PCI-Express` → `"PCI" "Express"`), so a query only matches what the document was actually tokenized into — an abbreviation (`PCI-E`) does not match the stored word `Express`.
+- **`--max-context-tokens` is not a hard output cap** (contract tightened in 0.1.3): it applies only with `--include-neighbors`; the target chunk is always returned in full and merely reduces the neighbor budget — a budget below the target's own estimate makes `get-chunk` fail closed with `ERROR_BUDGET_TOO_SMALL` instead of returning over-budget content. The metric is an estimate, not a tokenizer-exact count — never announce exact model token caps.
 - **Page location**: PDF `page_start` is reliable only where headings match PDF bookmarks; DOCX page numbers are always the placeholder 1.
 - **PDF tables**: the advertised borderless-table fallback is not yet wired into the pipeline — coverage depends on the built-in converter alone.
 - **C/H coverage**: symbols declared inside `#if` / header-guard blocks and function-like macros are missed; comment attachment is inconsistent.

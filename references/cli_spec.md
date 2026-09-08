@@ -84,10 +84,12 @@ doc-str [--base-dir PATH] [--locale en|zh] [-v|-vv] <command> ...
 - **Arguments**:
   - `--query <string>` (required)
   - `--mode <hybrid|fts|vec>` (optional, default: `hybrid`) — RRF hybrid, keyword, or vector similarity.
-  - `--min-fts-rank <N>` (optional, **hybrid mode only**) — keep only chunks among the FTS candidate positions 1..N; chunks with no keyword match are dropped. Note: the current FTS candidate list is ordered by document upload recency / section order, *not* by BM25 relevance, so "top N" is positional, not relevance-ranked.
+  - `--min-fts-rank <N>` (optional, **hybrid mode only**) — keep only chunks whose FTS **BM25 relevance rank** is ≤ N; chunks with no keyword match are dropped (since 0.1.3 the FTS candidate list is ordered by `bm25(chunks_fts)`, so this is a true relevance filter now).
   - `--limit <N>` (optional, default: 10)
   - `--doc-id <id>` (optional)
   - `--output <path.json>` (required)
+- **FTS ordering** (since 0.1.3): results are ordered by FTS5 **BM25 relevance** (lower score = better match, `c.id ASC` as tie-breaker), no longer by upload time. Without FTS5 match, the LIKE fallback is capped at `config.search_limit` (default 100).
+- **Punctuated query terms** (since 0.1.3): a query term such as `PCI-Express` is mapped to whitespace-split tokens `"PCI" "Express"` (FTS5 AND); a query only matches words the document was actually tokenized into — `PCI-E` does **not** match the stored word `Express`.
 - **Result shapes**: `fts` returns metadata rows plus a ~150-char snippet (no full content); `hybrid`/`vec` return the **full** chunk content — keep `--limit` small.
 - **Mode transparency**: the output `"mode"` field reflects the *requested* mode. Without embeddings, hybrid silently degrades to FTS-only (warning on stderr only) and `vec` returns no results; an agent reading JSON only cannot otherwise tell which path actually ran.
 
@@ -96,7 +98,7 @@ doc-str [--base-dir PATH] [--locale en|zh] [-v|-vv] <command> ...
 - **Arguments**:
   - `--chunk-id <id>` (required)
   - `--include-neighbors` (optional) — include previous and next adjacent chunks if context budget permits.
-  - `--max-context-tokens <N>` (optional) — maximum total token **estimate** budget. Current semantics: the target chunk is always returned in full; the budget (minus a fixed XML-escape reserve) constrains only the neighbors. Without `--include-neighbors` the flag has no effect. The count is a lightweight estimate, not a tokenizer-exact token count — do not treat it as a hard model token cap.
+  - `--max-context-tokens <N>` (optional) — maximum total token **estimate** budget. The target chunk is always returned in full; the budget (minus a fixed XML-escape reserve) constrains only the neighbors. Without `--include-neighbors` the flag has no effect. **Fail-closed (since 0.1.3)**: if the budget is below the target chunk's own estimated token count, the command exits with `ERROR_BUDGET_TOO_SMALL` (non-zero exit) rather than returning over-budget content. The count is a lightweight estimate, not a tokenizer-exact token count — do not treat it as a hard model token cap.
   - `--format <json|xml>` (optional, default: `json`) — output format (`json` or `xml` grounding structure).
   - `--output <path>` (required)
 

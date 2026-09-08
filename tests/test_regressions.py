@@ -8,6 +8,7 @@ numbering, DOCX table recovery, FTS/hybrid semantics).
 from __future__ import annotations
 
 import logging
+import sqlite3
 
 import pytest
 
@@ -179,6 +180,215 @@ def test_delete_cascades_tags_and_rows(tmp_path):
     assert database.get_document_embeddings(document_id=doc_id, config=config) == {}
     res = database.search_chunks("aspm", config=config)
     assert all(r.get("document_id") != doc_id for r in res)
+
+
+def _seed_ranking(config: AppConfig) -> tuple[int, int]:
+    """Seed two documents: an older doc whose single chunk contains the
+    probe word far more often, and a newer doc that mentions it once.
+
+    Returns (older_doc_id, newer_doc_id).
+    """
+    from doc_structuring import database
+
+    old_id = database.save_document("old.pdf", [
+        {"number": "1", "title": "Power Management",
+         "content": "The watchdog timer is configured. The watchdog interrupt "
+                    "handler calls the watchdog service routine; the watchdog "
+                    "state machine advances on each watchdog tick.",
+         "page_start": 1, "source": "old.pdf"},
+        {"number": "2", "title": "Clock Gating",
+         "content": "Idle clock gating is applied per logic block.",
+         "page_start": 2, "source": "old.pdf"},
+    ], config=config)
+    new_id = database.save_document("new.pdf", [
+        {"number": "1", "title": "Boot Flow",
+         "content": "The watchdog reset timeout occurs when the watchdog is "
+                    "not serviced in time.",
+         "page_start": 1, "source": "new.pdf"},
+    ], config=config)
+    return old_id, new_id
+
+
+def test_fts_ranking_is_relevance_not_recency(tmp_path):
+    """F01 regression: results must be ordered by BM25 relevance, not by
+    document upload time.  A more recently imported document mentioning
+    the probe term once must not outrank an older document mentioning it
+    many times."""
+    from doc_structuring import database
+
+    config = _make_config(tmp_path)
+    old_id, new_id = _seed_ranking(config)
+
+    results = database.search_chunks("watchdog", config=config)
+    assert len(results) == 2
+    assert results[0]["document_id"] == old_id, (
+        f"most relevant chunk must rank first, got order "
+        f"{[(r['document_id'], r['snippet'][:40]) for r in results]}"
+    )
+    assert results[1]["document_id"] == new_id
+
+
+def test_import_order_does_not_change_relevance_ranking(tmp_path):
+    """F01 acceptance criterion: reversing the import order of the same
+    corpus must not change the relevance ranking."""
+    from doc_structuring import database
+
+    old_chunks = [
+        {"number": "1", "title": "Power Management",
+         "content": "The watchdog timer is configured. The watchdog interrupt "
+                    "handler calls the watchdog service routine; the watchdog "
+                    "state machine advances on each watchdog tick.",
+         "page_start": 1, "source": "old.pdf"},
+    ]
+    new_chunks = [
+        {"number": "1", "title": "Boot Flow",
+         "content": "The watchdog reset timeout occurs when the watchdog is "
+                    "not serviced in time.",
+         "page_start": 1, "source": "new.pdf"},
+    ]
+
+    def _import_and_rank(order: list) -> list:
+        base = tmp_path / (order[0] + "-" + order[1])
+        base.mkdir(parents=True, exist_ok=True)
+        cfg = _make_config(base)
+        database.save_document(order[0],
+                               [dict(c) for c in (old_chunks if order[0] == "old.pdf" else new_chunks)],
+                               config=cfg)
+        database.save_document(order[1],
+                               [dict(c) for c in (old_chunks if order[1] == "old.pdf" else new_chunks)],
+                               config=cfg)
+        # rank by document NAME (doc ids differ between the two DBs)
+        conn = sqlite3.connect(str(cfg.db_path))
+        conn.row_factory = sqlite3.Row
+        id2name = dict(conn.execute("SELECT id, filename FROM documents").fetchall())
+        conn.close()
+        return [id2name[r["document_id"]]
+                for r in database.search_chunks("watchdog", config=cfg)]
+
+    forward = _import_and_rank(["old.pdf", "new.pdf"])
+    backward = _import_and_rank(["new.pdf", "old.pdf"])
+    assert forward == backward, (
+        f"ranking must be independent of import order: {forward} vs {backward}"
+    )
+    # the high-frequency doc ranks first in both import orders
+    assert forward[0] == "old.pdf", (
+        f"expected old.pdf to rank first, got {forward}"
+    )
+
+
+def test_fts5_escape_token_punctuation_contract():
+    """F01 token contract: punctuation becomes whitespace so query terms
+    map to the same unicode61 tokens as the stored text."""
+    from doc_structuring import database
+
+    assert database._fts5_escape_token("PCI-E") == '"PCI" "E"'
+    assert database._fts5_escape_token("1.2.3") == '"1" "2" "3"'
+    assert database._fts5_escape_token("l1.sub") == '"l1" "sub"'
+    assert database._fts5_escape_token("!!!") is None
+    assert database._fts5_escape_token("电源管理") == '"电源管理"'
+    assert database._fts5_escape_token("") is None
+
+
+def test_punctuated_identifier_query_hits_tokenized_content(tmp_path):
+    """F01 end-to-end: an identifier typed exactly as it appears in the
+    document must match the stored text (the unicode61 tokenizer split
+    both the stored text and — via the punctuation→whitespace rule — the
+    query at the same spots).  The old strip-everything rule turned
+    'PCI-Express' into the unmatchable token 'PCIEpress'."""
+    from doc_structuring import database
+
+    config = _make_config(tmp_path)
+    database.save_document("pci.pdf", [
+        {"number": "1", "title": "Link Training",
+         "content": "The PCI-Express link trains at Gen5 speeds.",
+         "page_start": 1, "source": "pci.pdf"},
+        {"number": "2", "title": "SPI",
+         "content": "The SPI flash is polled for readiness.",
+         "page_start": 2, "source": "pci.pdf"},
+    ], config=config)
+
+    hits = database.search_chunks("PCI-Express", config=config)
+    assert hits, "hyphenated identifier query matched nothing (F01)"
+    assert any(
+        "PCI" in r["snippet"].upper() and "EXPRESS" in r["snippet"].upper()
+        for r in hits
+    ), f"expected the Link Training chunk to match, got {hits}"
+
+
+def test_fts_search_limit_none_is_capped(tmp_path):
+    """F01 (LIKE fallback + FTS): a missing explicit limit must fall back
+    to the configured search_limit, never an unbounded row return."""
+    from doc_structuring import database
+
+    config = _make_config(tmp_path)
+    chunks = [
+        {"number": str(i), "title": f"Topic {i}",
+         "content": f"Watchdog behavior note number {i} in this document.",
+         "page_start": i, "source": "many.pdf"}
+        for i in range(1, 11)
+    ]
+    database.save_document("many.pdf", chunks, config=config)
+
+    # Default limit == config.search_limit (100 here), all 10 match → 10 rows.
+    default = database.search_chunks("watchdog", config=config, limit=None)
+    assert len(default) == 10
+
+    # Explicit limit is still honored.
+    tight = database.search_chunks("watchdog", config=config, limit=3)
+    assert len(tight) == 3
+
+
+def test_next_neighbor_truncation_is_still_returned(tmp_path):
+    """F02 regression: when the budget forces truncation of the NEXT
+    neighbor, the truncated dict must be written back to
+    result['next_chunk'] (it used to be silently dropped)."""
+    from doc_structuring import database
+
+    config = _make_config(tmp_path)
+    database.save_document("n.pdf", [
+        {"number": "1", "title": "A", "content": "Short alpha.",
+         "page_start": 1, "source": "n.pdf"},
+        {"number": "2", "title": "B", "content": "Target beta body.",
+         "page_start": 1, "source": "n.pdf"},
+        {"number": "3", "title": "C",
+         "content": "Gamma " + "gammaword " * 120,  # long next neighbor
+         "page_start": 2, "source": "n.pdf"},
+    ], config=config)
+    target_id = 2
+    result = database.get_chunk_with_neighbors(
+        target_id, include_neighbors=True, max_context_tokens=120, config=config
+    )
+    assert "previous_chunk" in result
+    assert "next_chunk" in result, (
+        "truncated next neighbor was dropped from the result (F02)"
+    )
+    # it must be the truncated banner version, not the full text
+    full = database.get_chunk(3, config=config)["content"]
+    assert result["next_chunk"]["content"] != full
+    assert "truncated due to token budget" in result["next_chunk"]["content"]
+
+
+def test_budget_too_small_for_target_is_reported(tmp_path):
+    """F02 contract: an explicit budget must at least cover the target
+    chunk's own estimate or the CLI path reports ERROR_BUDGET_TOO_SMALL."""
+    from doc_structuring import database
+    from doc_structuring.utils import estimate_tokens
+
+    config = _make_config(tmp_path)
+    database.save_document("b.pdf", [
+        {"number": "1", "title": "T",
+         "content": "Big target " + "tokenword " * 64,
+         "page_start": 1, "source": "b.pdf"},
+    ], config=config)
+    target = database.get_chunk(1, config=config)
+    assert estimate_tokens(target["content"]) > 100
+    # the function still returns the (full) target — the CLI is the layer
+    # that refuses with a clear error; keep the function's own contract:
+    result = database.get_chunk_with_neighbors(
+        1, include_neighbors=False, max_context_tokens=10, config=config
+    )
+    assert result["chunk"]["id"] == 1
+    assert result["chunk"]["content"] == target["content"]
 
 
 # ---------------------------------------------------------------------------

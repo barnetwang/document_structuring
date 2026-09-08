@@ -105,13 +105,21 @@ def get_db(db_path: Path) -> Generator[sqlite3.Connection, None, None]:
 def _fts5_escape_token(token: str) -> str | None:
     """Sanitize a user token for safe FTS5 MATCH usage.
 
-    Strips all FTS5 special characters, keeps only alphanumeric and CJK.
+    Punctuation is replaced with spaces rather than deleted, so that
+    identifiers such as ``PCI-E`` map to the ``unicode61`` tokens
+    ``PCI`` and ``E`` and are queried as ``"PCI" "E"`` (all fragments
+    must match).  This mirrors how the FTS5 tokenizer actually split
+    the stored text; the previous strip-everything rule produced
+    ``1.2.3 -> "123"`` and ``PCI-E -> "PCIE"``, which never matched.
     Returns ``None`` if the cleaned token is empty.
     """
-    cleaned = re.sub(r'[^\w\u4e00-\u9fff]', '', token, flags=re.UNICODE).strip()
+    cleaned = re.sub(r'[^\w\u4e00-\u9fff]+', ' ', token).strip()
     if not cleaned:
         return None
-    return f'"{cleaned}"'
+    parts = [f'"{p}"' for p in cleaned.split() if p]
+    if not parts:
+        return None
+    return " ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -721,7 +729,15 @@ def get_chunk_with_neighbors(
     max_context_tokens: int | None = None,
     config: AppConfig | None = None,
 ) -> dict | None:
-    """Retrieve a chunk by ID, optionally including adjacent chunks within token budget."""
+    """Retrieve a chunk by ID, optionally including adjacent chunks.
+
+    Token-budget semantics (estimated counts via
+    :func:`doc_structuring.utils.estimate_tokens`): the target chunk is
+    always returned in full; ``max_context_tokens`` constrains neighbor
+    expansion only (minus a fixed XML-escape reserve).  Callers that need
+    a total-output guarantee must check the target chunk's size first and
+    handle the budget-too-small case themselves.
+    """
     from .utils import estimate_tokens, truncate_chunk_content
 
     target = get_chunk(chunk_id, config=config)
@@ -813,7 +829,7 @@ def get_chunk_with_neighbors(
                 result["previous_chunk"] = prev_dict
                 remaining_budget -= estimate_tokens(truncated)
 
-    if next_row and (max_context_tokens is None or remaining_budget > 20):
+    if next_row and (max_context_tokens is None or remaining_budget >= 20):
         next_dict = _parse_row(next_row)
         next_dict["cross_section"] = _is_cross_section(
             next_dict["section_number"], target["section_number"]
@@ -828,6 +844,8 @@ def get_chunk_with_neighbors(
             )
             if truncated:
                 next_dict["content"] = truncated
+                result["next_chunk"] = next_dict
+                remaining_budget -= estimate_tokens(truncated)
     return result
 
 
@@ -879,9 +897,11 @@ def search_chunks(
         params.append(document_id)
 
     max_limit = limit if limit is not None else max(1, int(config.search_limit))
-    sql += (
-        " ORDER BY d.upload_time DESC, c.section_number ASC LIMIT ?"
-    )
+    # Order by FTS5 BM25 relevance (lower score = better match) with a
+    # stable deterministic tie-breaker.  The previous
+    # "upload_time DESC, section_number ASC" order made recency, not
+    # relevance, decide the ranking (finding F01).
+    sql += (" ORDER BY bm25(chunks_fts), c.id ASC LIMIT ?")
     params.append(max_limit)
 
 
@@ -914,7 +934,11 @@ def search_chunks(
             sql_fallback += (
                 " ORDER BY d.upload_time DESC, c.section_number ASC LIMIT ?"
             )
-            params_fallback.append(limit)
+            # Guard against a None limit: "LIMIT NULL" silently returns
+            # every matching row (finding F01, LIKE path).
+            params_fallback.append(
+                limit if limit is not None else max(1, int(config.search_limit))
+            )
 
             cursor.execute(sql_fallback, params_fallback)
             results = [dict(row) for row in cursor.fetchall()]

@@ -118,10 +118,11 @@ doc-str get-chunk --chunk-id 100 --include-neighbors --max-context-tokens 2000 -
 
 ## Known Limitations
 
-Verified at v0.1.2; tracked for fix in order of priority:
+Fixed in **v0.1.3** (2026-09-08, F01/F02 from the 2026-09-08 code review):
 
-- **Search ordering**: FTS results are ordered by upload recency / section, not BM25 relevance; `--min-fts-rank` filters that positional order (hybrid mode only). Newer documents can outrank more relevant older ones.
-- **Token budget**: `--max-context-tokens` is an estimate applied to neighbors only; the target chunk is never truncated, and counts are not tokenizer-exact.
+- **Search ordering** (fixed): FTS results are now ordered by FTS5 `bm25()` relevance (stable id tie-breaker); the FTS LIKE-fallback is capped by `config.search_limit`; `--min-fts-rank` filters that relevance rank (hybrid mode only).
+- **Punctuated query terms** (new contract, 0.1.3): query punctuation maps to whitespace (`PCI-Express` → `"PCI" "Express"`), matching how the `unicode61` tokenizer split the stored text. An abbreviation does not match a longer stored word (`PCI-E` ≠ `Express`).
+- **Token budget** (tightened): `--max-context-tokens` is an estimate applied to neighbors only; the target chunk is never truncated; if the budget is below the target's own estimate, `get-chunk` fails closed with `ERROR_BUDGET_TOO_SMALL` instead of returning over-budget content; a truncated next-neighbor is no longer dropped from the result.
 - **Page location**: PDF `page_start` is reliable only where headings match PDF bookmarks; DOCX page numbers are always the placeholder 1 (cite by section/symbol instead).
 - **Tables**: DOCX rendering escapes `|` oddly and deduplicates consecutive identical rows; the advertised PDF borderless fallback is not yet active.
 - **C/H extraction**: top-level symbols only; no `#if`-container or function-like-macro coverage; comment attachment is inconsistent.

@@ -153,15 +153,39 @@ def handle_toc(args: argparse.Namespace, config: AppConfig) -> None:
 def handle_get_chunk(args: argparse.Namespace, config: AppConfig) -> None:
     """Retrieve a single chunk by its database ID with optional neighbors and XML formatting."""
     try:
+        from .utils import estimate_tokens
+
         chunk_data = database.get_chunk_with_neighbors(
             args.chunk_id,
             include_neighbors=getattr(args, "include_neighbors", False),
-            max_context_tokens=getattr(args, "max_context_tokens", None),
+            max_context_tokens=None,  # size the target before applying the budget
             config=config,
         )
         if not chunk_data or not chunk_data.get("chunk"):
             logger.error("Chunk with ID %s not found.", args.chunk_id)
             sys.exit(1)
+
+        budget = getattr(args, "max_context_tokens", None)
+        if budget is not None and estimate_tokens(chunk_data["chunk"]["content"]) > budget:
+            logger.error(
+                "ERROR_BUDGET_TOO_SMALL: request budget %s tokens is below "
+                "the estimate %s for target chunk %s alone; the target chunk "
+                "is always returned in full. Increase --max-context-tokens "
+                "or drop --include-neighbors.",
+                budget,
+                estimate_tokens(chunk_data["chunk"]["content"]),
+                args.chunk_id,
+            )
+            sys.exit(1)
+
+        if budget is not None:
+            # Re-run with the real budget now that the target fits.
+            chunk_data = database.get_chunk_with_neighbors(
+                args.chunk_id,
+                include_neighbors=getattr(args, "include_neighbors", False),
+                max_context_tokens=budget,
+                config=config,
+            )
 
         fmt = getattr(args, "format", "json")
         if fmt == "xml":
