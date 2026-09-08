@@ -11,7 +11,9 @@ class DocumentExtractor(Protocol):
     """Interface that all document format extractors must satisfy.
 
     Each extractor converts a file into a flat list of ``(page_number, line_text)``
-    tuples that the parser can process into structured chunks.
+    tuples that the parser can process into structured chunks.  The page number
+    is ``None`` when the source format has no reliable pagination (DOCX,
+    source code — finding F03).
 
     Optional keyword-only arguments (``temp_dir``, ``ignore_patterns``,
     ``batch_size`` for PDF) may be accepted by concrete implementations.
@@ -24,7 +26,7 @@ class DocumentExtractor(Protocol):
         temp_dir: str | Path | None = None,
         ignore_patterns: Sequence[re.Pattern[str]] | None = None,
         **kwargs,
-    ) -> list[tuple[int, str]]:
+    ) -> list[tuple[int | None, str]]:
         """Extract text lines from the given file.
 
         Args:
@@ -33,6 +35,6 @@ class DocumentExtractor(Protocol):
             ignore_patterns: Optional line filters during extraction.
 
         Returns:
-            A list of (1-based page number, stripped text line) tuples.
+            A list of (page number or None, stripped text line) tuples.
         """
         ...

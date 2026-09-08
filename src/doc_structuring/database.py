@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 #: (per process). A warning per run, not per query.
 _VEC_WARNED: set[int | None] = set()
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 
@@ -224,7 +224,8 @@ def init_db(config: AppConfig | None = None) -> None:
                 section_number TEXT NOT NULL,
                 title TEXT NOT NULL,
                 content TEXT NOT NULL,
-                page_start INTEGER NOT NULL,
+                page_start INTEGER,
+                page_end INTEGER,
                 file_path TEXT,
                 cross_references TEXT,
                 doc_type TEXT DEFAULT 'spec',
@@ -235,7 +236,7 @@ def init_db(config: AppConfig | None = None) -> None:
             );
         """)
 
-        # Migration guards for v4-v6 schema
+        # Migration guards for v4-v7 schema
         cursor.execute("PRAGMA table_info(chunks);")
         cols = [r['name'] for r in cursor.fetchall()]
         if "cross_references" not in cols:
@@ -248,6 +249,78 @@ def init_db(config: AppConfig | None = None) -> None:
             cursor.execute("ALTER TABLE chunks ADD COLUMN line_start INTEGER;")
         if "line_end" not in cols:
             cursor.execute("ALTER TABLE chunks ADD COLUMN line_end INTEGER;")
+
+        # -----------------------------------------------------------------
+        # Migration v6→v7: page_start becomes nullable and page_end is
+        # added (finding F03: DOCX/code pages are UNKNOWN, not "page 1";
+        # PDF chunks carry a physical page span).
+        #
+        # SQLite (>= 3.35) cannot drop a NOT NULL constraint in place, and
+        # DROP COLUMN would *destroy the stored page values*, so the table
+        # is rebuilt the classic way: new schema, data copied row-by-row
+        # (rowids preserved), old table dropped, name swapped back.
+        # Triggers/FTS are re-created by the FTS setup that follows.
+        # -----------------------------------------------------------------
+        page_start_notnull = False
+        if "page_start" in cols:
+            info = dict(
+                (r["name"], (r["notnull"], r["type"], r["dflt_value"]))
+                for r in cursor.execute("PRAGMA table_info(chunks);")
+                .fetchall()
+            )
+            nn, typ, dflt = info.get("page_start", (0, "INTEGER", None))
+            page_start_notnull = bool(nn)
+
+        if page_start_notnull:
+            fk_was_on = False
+            try:
+                cursor.execute("PRAGMA foreign_keys = OFF;")
+                fk_was_on = True
+                cursor.execute("ALTER TABLE chunks RENAME TO _chunks_v7_old;")
+                cursor.execute("""
+                    CREATE TABLE _chunks_v7_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        document_id INTEGER NOT NULL,
+                        section_number TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        page_start INTEGER,
+                        page_end INTEGER,
+                        file_path TEXT,
+                        cross_references TEXT,
+                        doc_type TEXT DEFAULT 'spec',
+                        symbol_name TEXT,
+                        line_start INTEGER,
+                        line_end INTEGER,
+                        FOREIGN KEY (document_id) REFERENCES documents (id) ON DELETE CASCADE
+                    );
+                """)
+                cursor.execute("""
+                    INSERT INTO _chunks_v7_new (
+                        id, document_id, section_number, title, content,
+                        page_start, file_path, cross_references, doc_type,
+                        symbol_name, line_start, line_end
+                    )
+                    SELECT id, document_id, section_number, title, content,
+                           page_start, file_path, cross_references, doc_type,
+                           symbol_name, line_start, line_end
+                    FROM _chunks_v7_old;
+                """)
+                cursor.execute("DROP TABLE _chunks_v7_old;")
+                cursor.execute("ALTER TABLE _chunks_v7_new RENAME TO chunks;")
+            finally:
+                if fk_was_on:
+                    cursor.execute("PRAGMA foreign_keys = ON;")
+            conn.commit()
+            cursor.execute("PRAGMA table_info(chunks);")
+            cols = [r['name'] for r in cursor.fetchall()]
+        elif "page_start" not in cols:
+            # Damaged v7 state (an earlier buggy migration dropped the
+            # column without re-adding it): restore the column; stored
+            # values must be re-hydrated by an explicit recovery pass.
+            cursor.execute("ALTER TABLE chunks ADD COLUMN page_start INTEGER;")
+        elif "page_end" not in cols:
+            cursor.execute("ALTER TABLE chunks ADD COLUMN page_end INTEGER;")
 
 
 
@@ -407,15 +480,16 @@ def save_document(
                 from .parser import extract_cross_references
                 cursor.executemany(
                     "INSERT INTO chunks "
-                    "(document_id, section_number, title, content, page_start, file_path, cross_references) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "(document_id, section_number, title, content, page_start, page_end, file_path, cross_references) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         (
                             document_id,
                             chunk["number"],
                             chunk["title"],
                             chunk["content"],
-                            chunk["page_start"],
+                            chunk.get("page_start"),
+                            chunk.get("page_end"),
                             "",  # placeholder — filled after files written
                             json.dumps(
                                 chunk.get(
@@ -514,7 +588,15 @@ def save_document(
                     f.write("metadata:\n")
                     f.write(f"- source file: {chunk.get('source', filename)}\n")
                     f.write(f"- section number: {number}\n")
-                    f.write(f"- page start: {chunk['page_start']}\n")
+                    p_start = chunk.get("page_start")
+                    p_end = chunk.get("page_end")
+                    if p_start is None:
+                        f.write("- page: unknown (source format has no reliable pagination)\n")
+                    elif p_end is not None and p_end != p_start:
+                        f.write(f"- page start: {p_start}\n")
+                        f.write(f"- page end: {p_end}\n")
+                    else:
+                        f.write(f"- page: {p_start} (physical PDF page)\n")
                     if chunk_images:
                         f.write("- images:\n")
                         for img in chunk_images:
@@ -544,7 +626,8 @@ def save_document(
                         "section_number": number,
                         "title": title,
                         "file": chunk_filename,
-                        "page_start": chunk["page_start"],
+                        "page_start": chunk.get("page_start"),
+                        "page_end": chunk.get("page_end"),
                     }
                     if chunk_images:
                         entry["images"] = [img["rel_path"] for img in chunk_images]
@@ -600,7 +683,8 @@ def save_document(
         toc_dict_for_display[key] = {
             "file": entry["file"],
             "title": entry["title"],
-            "page_start": entry["page_start"],
+            "page_start": entry.get("page_start"),
+            "page_end": entry.get("page_end"),
             "images": entry.get("images", []),
         }
 
@@ -699,7 +783,7 @@ def get_document_toc(
     with get_db(config.db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, section_number, title, page_start, file_path
+            SELECT id, section_number, title, page_start, page_end, file_path
             FROM chunks
             WHERE document_id = ?
         """, (document_id,))
@@ -731,7 +815,7 @@ def get_chunk(
         cursor = conn.cursor()
         cursor.execute("""
             SELECT c.id, c.document_id, c.section_number, c.title,
-                   c.content, c.page_start, c.file_path, c.cross_references,
+                   c.content, c.page_start, c.page_end, c.file_path, c.cross_references,
                    c.doc_type, c.symbol_name, c.line_start, c.line_end,
                    d.filename AS document_name
             FROM chunks c
@@ -803,7 +887,7 @@ def get_chunk_with_neighbors(
         # Fetch previous chunk
         cursor.execute("""
             SELECT c.id, c.document_id, c.section_number, c.title,
-                   c.content, c.page_start, c.file_path, c.cross_references,
+                   c.content, c.page_start, c.page_end, c.file_path, c.cross_references,
                    c.doc_type, c.symbol_name, c.line_start, c.line_end,
                    d.filename AS document_name
             FROM chunks c
@@ -817,7 +901,7 @@ def get_chunk_with_neighbors(
         # Fetch next chunk
         cursor.execute("""
             SELECT c.id, c.document_id, c.section_number, c.title,
-                   c.content, c.page_start, c.file_path, c.cross_references,
+                   c.content, c.page_start, c.page_end, c.file_path, c.cross_references,
                    c.doc_type, c.symbol_name, c.line_start, c.line_end,
                    d.filename AS document_name
             FROM chunks c
@@ -911,7 +995,7 @@ def search_chunks(
 
     sql = """
         SELECT c.id, c.document_id, c.section_number, c.title,
-               c.page_start, c.file_path,
+               c.page_start, c.page_end, c.file_path,
                d.filename AS document_name,
                snippet(chunks_fts, 1, '==', '==', '...', 150) AS snippet
         FROM chunks_fts f
@@ -946,7 +1030,7 @@ def search_chunks(
 
             sql_fallback = """
                 SELECT c.id, c.document_id, c.section_number, c.title,
-                       c.page_start, c.file_path,
+                       c.page_start, c.page_end, c.file_path,
                        d.filename AS document_name,
                        substr(c.content, 1, 300) AS snippet
                 FROM chunks c
@@ -1257,9 +1341,9 @@ def save_code_chunks(
             cursor.executemany(
                 """
                 INSERT INTO chunks (
-                    document_id, section_number, title, content, page_start, file_path,
+                    document_id, section_number, title, content, page_start, page_end, file_path,
                     cross_references, doc_type, symbol_name, line_start, line_end
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -1267,7 +1351,8 @@ def save_code_chunks(
                         str(idx + 1),
                         c.get("symbol_name") or c.get("section_name") or filename,
                         c["content"],
-                        1,
+                        None,  # page is unknown for source docs (F03)
+                        None,  # page_end likewise unknown
                         file_path,
                         json.dumps(c.get("cross_references", []), ensure_ascii=False),
                         doc_type,

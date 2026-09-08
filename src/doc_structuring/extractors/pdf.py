@@ -13,7 +13,7 @@ import fitz
 import pymupdf4llm
 
 from . import register
-from ..parser import MD_HEADING_REGEX, is_ignored
+from ..parser import is_ignored
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,6 @@ _ANCHOR_PATTERN = re.compile(r"GRAPHICANCHOR([A-Za-z0-9_-]+)ENDANCHOR")
 _CAPTION_REGEX = re.compile(
     r"^(Figure|Table|圖|表|Fig\.?)\s*\d+([.-]\d+)?.*$", re.IGNORECASE
 )
-_STRIP_SECTION_NUM = re.compile(r"^\d+(\.\d+)*\s*", re.ASCII)
 _MD_HEADER_SEP_PATTERN = re.compile(r"\|(?:\s*:?-+:?\s*\|)+")
 
 
@@ -149,14 +148,18 @@ def _cluster_rects(rects: list[fitz.Rect], threshold: float = 25.0) -> list[fitz
 
 @register(".pdf")
 class PdfExtractor:
-    """Extract text lines from PDF files using pymupdf4llm in batch mode.
+    """Extract text lines from PDF files using pymupdf4llm.
 
     Pipeline (optimised for large manuals):
-      1. Build heading→page map from PDF bookmarks (TOC).
-      2. Pre-process *all* pages once: cluster drawings/images, crop PNGs,
+      1. Pre-process *all* pages once: cluster drawings/images, crop PNGs,
          redact overlapping text, insert margin anchors.
-      3. Serialise the modified document **once**, then batch-convert to
-         Markdown (avoids rewriting the full PDF on every batch).
+      2. Serialise the modified document **once**, then convert to
+         Markdown with ``page_chunks=True`` so **every physical page
+         produces exactly one chunk** — line→page attribution is exact
+         and never depends on PDF bookmarks (finding F03: the previous
+         batch mode attributed all lines of a 50-page batch to the
+         batch's first page unless a heading happened to match a TOC
+         entry).
     """
 
     def extract_lines(
@@ -171,12 +174,15 @@ class PdfExtractor:
 
         Args:
             file_path: Path to the PDF file.
-            batch_size: Pages per pymupdf4llm batch (default 50).
+            batch_size: Accepted for backward compatibility; the
+                page-chunked conversion path no longer batches pages.
             temp_dir: Directory for intermediate cropped images.
             ignore_patterns: Optional line filters (defaults to built-ins).
 
         Returns:
-            A list of (1-based page number, text line) tuples.
+            A list of (1-based physical page number, text line) tuples.
+            Page attribution is by physical page span — no bookmark or
+            printed-label guessing is involved.
         """
         doc = fitz.open(file_path)
         lines: list[tuple[int, str]] = []
@@ -187,34 +193,7 @@ class PdfExtractor:
         work_dir.mkdir(parents=True, exist_ok=True)
 
         # ------------------------------------------------------------------
-        # Step 1: heading→page map from PDF internal TOC
-        # ------------------------------------------------------------------
-        toc_page_map: dict[str, int] = {}
-        try:
-            for _lvl, title, page in doc.get_toc():
-                t = title.strip()
-                if not t:
-                    continue
-                toc_page_map[t] = page
-                no_num = _STRIP_SECTION_NUM.sub("", t).strip()
-                if no_num and no_num != t:
-                    toc_page_map[no_num] = page
-        except Exception:
-            toc_page_map = {}
-
-        def resolve_heading_page(title_text: str) -> int | None:
-            title_lower = title_text.lower()
-            best_len, best_page = 0, 1
-            for t_t, p in toc_page_map.items():
-                tp = t_t.lower()
-                if (
-                    title_lower == tp or title_lower in tp or tp in title_lower
-                ) and len(t_t) > best_len:
-                    best_len, best_page = len(t_t), p
-            return best_page if best_len > 0 else None
-
-        # ------------------------------------------------------------------
-        # Step 2: Pre-process ALL pages once (graphics cluster + anchors)
+        # Step 1: Pre-process ALL pages once (graphics cluster + anchors)
         # ------------------------------------------------------------------
         for pno in range(total_pages):
             page = doc[pno]
@@ -352,14 +331,28 @@ class PdfExtractor:
                 logger.error("Failed to decode anchor base64: %s", e)
                 return match.group(0)
 
-        for start_page in range(0, total_pages, batch_size):
-            end_page = min(start_page + batch_size, total_pages)
-            page_indices = list(range(start_page, end_page))
+        # ------------------------------------------------------------------
+        # Step 2: Page-chunked markdown conversion.
+        #
+        # page_chunks=True yields exactly one entry per physical page, in
+        # page order.  Every text line is therefore attributed to its true
+        # physical page with no bookmark lookup (finding F03).  For a 73-page
+        # manual this single call takes ~10 s — competitive with the old
+        # batched path and correct by construction.
+        # ------------------------------------------------------------------
+        page_chunks = pymupdf4llm.to_markdown(
+            doc_reloaded, pages=list(range(total_pages)), page_chunks=True
+        )
+        if len(page_chunks) != total_pages:
+            raise RuntimeError(
+                "Page-chunked conversion returned "
+                f"{len(page_chunks)} chunks for {total_pages} pages; "
+                "cannot attribute lines to physical pages reliably."
+            )
 
-            batch_md = pymupdf4llm.to_markdown(doc_reloaded, pages=page_indices)
-            current_page = start_page + 1
-
-            for raw_line in batch_md.splitlines():
+        for idx, page_chunk in enumerate(page_chunks):
+            page_num = idx + 1
+            for raw_line in (page_chunk.get("text") or "").splitlines():
                 stripped = raw_line.strip()
                 if is_ignored(
                     stripped, is_markdown=True, ignore_patterns=ignore_patterns
@@ -367,18 +360,7 @@ class PdfExtractor:
                     continue
 
                 new_line = _ANCHOR_PATTERN.sub(replace_anchor, raw_line)
-
-                md_m = MD_HEADING_REGEX.match(new_line.strip())
-                if md_m:
-                    title_text = md_m.group(2).strip()
-                    title_text = re.sub(
-                        r"^[\*_#\s]+|[\*_#\s]+$", "", title_text
-                    ).strip()
-                    resolved_page = resolve_heading_page(title_text)
-                    if resolved_page and start_page < resolved_page <= end_page:
-                        current_page = resolved_page
-
-                lines.append((current_page, new_line))
+                lines.append((page_num, new_line))
 
         doc_reloaded.close()
         return lines

@@ -90,13 +90,30 @@ def _xml_escape(val: str | int | None) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _page_number_line(chunk: dict, indent: str = "    ") -> str:
+    """Render a ``<page_number>`` element with honest provenance (F03).
+
+    - ``page_start is None`` -> ``<page_number unknown="true" />``
+      (DOCX / source code: no reliable pagination, never "page 1").
+    - ``page_end`` > ``page_start`` -> start/end span (cross-page chunk).
+    - otherwise a bare physical page number.
+    """
+    p_start = chunk.get("page_start")
+    p_end = chunk.get("page_end")
+    if p_start is None:
+        return indent + '<page_number unknown="true" />'
+    if p_end is not None and p_end != p_start:
+        return indent + f'<page_number start="{p_start}" end="{p_end}" />'
+    return indent + f"<page_number>{p_start}</page_number>"
+
+
 def format_chunk_to_xml(chunk_data: dict) -> str:
     """Format a chunk dictionary (with optional neighbors) into LLM-ready XML grounding structure."""
     chunk = chunk_data.get("chunk", chunk_data)
     doc_title = _xml_escape(chunk.get("document_name") or chunk.get("source", "Document"))
     sec_num = _xml_escape(chunk.get("section_number", "0"))
     sec_title = _xml_escape(chunk.get("title", ""))
-    page_num = _xml_escape(chunk.get("page_start", 1))
+    page_line = _page_number_line(chunk)
     content = _xml_escape(chunk.get("content", ""))
 
     doc_type = _xml_escape(chunk.get("doc_type", "spec"))
@@ -111,7 +128,7 @@ def format_chunk_to_xml(chunk_data: dict) -> str:
         f"    <document_title>{doc_title}</document_title>",
         f"    <section_number>{sec_num}</section_number>",
         f"    <section_title>{sec_title}</section_title>",
-        f"    <page_number>{page_num}</page_number>",
+        page_line,
     ]
 
     if symbol_name:
@@ -145,7 +162,7 @@ def format_chunk_to_xml(chunk_data: dict) -> str:
             f'  <neighbor_context position="previous"{cs_attr}>',
             f'    <section_number>{_xml_escape(prev_chunk.get("section_number", ""))}</section_number>',
             f'    <section_title>{_xml_escape(prev_chunk.get("title", ""))}</section_title>',
-            f'    <page_number>{_xml_escape(prev_chunk.get("page_start", 1))}</page_number>',
+            _page_number_line(prev_chunk),
             '    <content>',
             f'{_xml_escape(prev_chunk.get("content", "").strip())}',
             '    </content>',
@@ -165,7 +182,7 @@ def format_chunk_to_xml(chunk_data: dict) -> str:
             f'  <neighbor_context position="next"{cs_attr}>',
             f'    <section_number>{_xml_escape(next_chunk.get("section_number", ""))}</section_number>',
             f'    <section_title>{_xml_escape(next_chunk.get("title", ""))}</section_title>',
-            f'    <page_number>{_xml_escape(next_chunk.get("page_start", 1))}</page_number>',
+            _page_number_line(next_chunk),
             '    <content>',
             f'{_xml_escape(next_chunk.get("content", "").strip())}',
             '    </content>',

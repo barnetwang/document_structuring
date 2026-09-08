@@ -26,14 +26,14 @@ def _is_bold_paragraph(para) -> bool:
     return all(run.bold for run in runs)
 
 
-def _merge_split_headings(lines: list[tuple[int, str]]) -> list[tuple[int, str]]:
+def _merge_split_headings(lines: list[tuple[int | None, str]]) -> list[tuple[int | None, str]]:
     """Merge lines where a bare section number is split from its title.
 
     Some DOCX exports produce two consecutive paragraphs for a single
     heading — e.g. ``"1.2"`` followed by ``"Overview"``.  This function
     joins them back into ``"1.2 Overview"``.
     """
-    merged: list[tuple[int, str]] = []
+    merged: list[tuple[int | None, str]] = []
     i = 0
 
     while i < len(lines):
@@ -102,7 +102,7 @@ class DocxExtractor:
         *,
         temp_dir: str | Path | None = None,
         ignore_patterns: Sequence[re.Pattern[str]] | None = None,
-    ) -> list[tuple[int, str]]:
+    ) -> list[tuple[int | None, str]]:
         """Extract text lines from a DOCX file.
 
         Args:
@@ -111,13 +111,16 @@ class DocxExtractor:
             ignore_patterns: Optional line filters (defaults to built-ins).
 
         Returns:
-            A list of (1-based page number, text line) tuples with
+            A list of (page number, text line) tuples with
             Markdown heading prefixes applied where appropriate.
+            The page number is ``None`` for every line — DOCX has no
+            reliable page map, and a fake "page 1" is exactly what
+            finding F03 asked to stop.
         """
         doc = Document(file_path)
-        lines: list[tuple[int, str]] = []
-        # DOCX has no reliable page map; keep a constant page marker.
-        page_num = 1
+        lines: list[tuple[int | None, str]] = []
+        # DOCX has no reliable page map — page is UNKNOWN (F03).
+        page_num: int | None = None
 
         work_dir_parent = Path(temp_dir) if temp_dir else Path(".doc_structuring_tmp")
         work_dir_parent.mkdir(parents=True, exist_ok=True)

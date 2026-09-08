@@ -23,7 +23,7 @@ pip install -e .
 | `--locale` / `DOC_STRUCTURING_LOCALE` | Generated catalog/index language (`en` default, `zh` supported) |
 | `AppConfig.extra_ignore_patterns` | Extra regexes for header/footer line filtering (Python API) |
 | `AppConfig.bad_heading_keywords` | Title substrings rejected as section headings |
-| `AppConfig.pdf_batch_size` | Pages per PDF markdown batch (default 50) |
+| `AppConfig.pdf_batch_size` | Legacy PDF batch hint (no longer controls page attribution) |
 | `AppConfig.search_limit` | Max FTS/LIKE search hits (default 100) |
 
 Global flags (before the subcommand):
@@ -44,6 +44,7 @@ doc-str [--base-dir PATH] [--locale en|zh] [-v|-vv] <command> ...
   - `--tags "<comma-separated-tags>"` (optional)
   - `--output <path.json>` (required)
 - **Identity**: documents are keyed by **filename (basename)** only — re-parsing the same filename anywhere replaces the existing document. **Atomic replacement (since 0.1.4)**: the new row + files are created and verified first; the previous version's rows are removed and committed in the same transaction. A failed re-parse rolls back and the previous version (rows, FTS, files) is fully intact. After any successful re-parse, verify with `list` + `toc` (chunk count, expected sections present).
+- **Page provenance (since 0.1.5)**: PDF text is converted one physical page at a time, so `page_start` is the **exact physical page** and `page_end` ≥ `page_start` when a section crosses pages — no bookmark/heading matching is involved. DOCX and code chunks have `page_start = NULL` (unknown); their `toc` pages must not be cited.
 
 ### `parse-code`
 

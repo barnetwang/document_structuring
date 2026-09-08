@@ -1,7 +1,7 @@
 ---
 name: doc-str
 description: "Use when parsing/searching hardware/firmware spec docs (PDF/DOCX), C/H source, or EDK2 build configs: registers, GUIDs, error codes, C symbols, section lookup, spec-to-code evidence. Not a compiler or build resolver."
-version: 0.1.4
+version: 0.1.5
 author: Barnet Wang
 license: Apache-2.0
 ---
@@ -65,12 +65,12 @@ doc-str embed --doc-id <id> --output <temp_embed.json>
 ```
 `parse-code` **appends** (fresh document each run) — delete the old code document before re-ingesting if you want a clean replace. `embed` recomputes every chunk in scope with no staleness check; re-run it after any re-parse of an embedded document.
 
-## Known Limitations (F01/F02/F07 fixed: 0.1.3 @ 2026-09-08, 0.1.4 @ 2026-09-08)
+## Known Limitations (fixed: F01/F02 in 0.1.3, F07 in 0.1.4, F03 in 0.1.5 — 2026-09-08)
 
 - **FTS ordering** (fixed in 0.1.3): `search` results are now ordered by **BM25 relevance** (`bm25(chunks_fts)`, stable tie-breaker on chunk id); `--min-fts-rank <N>` (hybrid mode only) filters that same relevance-ordered rank. Punctuated terms are mapped to whitespace-split tokens (`PCI-Express` → `"PCI" "Express"`), so a query only matches what the document was actually tokenized into — an abbreviation (`PCI-E`) does not match the stored word `Express`.
 - **`--max-context-tokens` is not a hard output cap** (contract tightened in 0.1.3): it applies only with `--include-neighbors`; the target chunk is always returned in full and merely reduces the neighbor budget — a budget below the target's own estimate makes `get-chunk` fail closed with `ERROR_BUDGET_TOO_SMALL` instead of returning over-budget content. The metric is an estimate, not a tokenizer-exact count — never announce exact model token caps.
 - **Re-parse is atomic** (fixed in 0.1.4): `save_document` now inserts the new version, writes all its files, backfills paths, and only then removes the old rows + commits as one transaction. A failed re-parse rolls back — the previous version (rows, FTS, files) stays fully intact. The new version's partial tree is removed. Post-commit maintenance (old tree, scratch dirs, index/catalog) best-effort: failures there leave stale artifacts but never corrupt committed data. Ingestion remains serial per base-dir — the write lock is held during file I/O.
-- **Page location**: PDF `page_start` is reliable only where headings match PDF bookmarks; DOCX page numbers are always the placeholder 1.
+- **Page location** (fixed in 0.1.5): PDF `page_start`/`page_end` are **exact physical pages** — the converter now emits one markdown chunk per physical page, so no heading/bookmark matching is involved; a `page_end > page_start` span means the section crosses pages. DOCX and source-code chunks have `page_start = NULL` (unknown) — cite sections/paragraphs instead of inventing a page.
 - **PDF tables**: the advertised borderless-table fallback is not yet wired into the pipeline — coverage depends on the built-in converter alone.
 - **C/H coverage**: symbols declared inside `#if` / header-guard blocks and function-like macros are missed; comment attachment is inconsistent.
 - **DOCX tables**: `|` inside cell text is escaped oddly; consecutive identical rows are silently deduplicated. Verify critical table data (bit expressions, compliance rows) against the original file.
@@ -83,8 +83,8 @@ When inspecting `<document_context>` XML from `get-chunk --format xml`:
 1. **Strict context boundaries**: answer using ONLY information contained within `<document_context>` (plus explicitly requested neighbor chunks).
 2. **Cite locators that actually exist**:
    - *Code*: `[Source: Platform/Pei/S3Resume.c, Symbol: S3ResumeBoot, Lines 20-28]` — file/symbol/lines are the strongest locators.
-   - *PDF*: `[Page 682, Section 9.2.6]` only when the document is bookmark-anchored; otherwise lead with the section number and state the page is approximate.
-   - *DOCX*: "Page 1" is a placeholder — never cite it; use section number / symbol / table position instead.
+   - *PDF*: `[Page 682, Section 9.2.6]` (or `[Pages 682–684, Section 9.2.6]` across a page span) — the page number is physical and exact. *DOCX/code*: cite the section/paragraph only; a `page_number unknown="true"` means no page may be stated.
+   - *DOCX*: pages are `unknown` (NULL) — never cite a page number; use section number / symbol / table position instead.
 3. **Cross-section neighbor caution**: note `<neighbor_context cross_section="true">` flags when context crosses section boundaries.
 4. **Evidence constraint / abstention**: if the requested fact (register bitfield, parameter, spec requirement) is absent from the context, state "Insufficient evidence in context" and stop. TOC-first is a workflow, not an anti-hallucination guarantee.
 

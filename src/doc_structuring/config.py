@@ -57,7 +57,10 @@ class AppConfig:
         extra_ignore_patterns: Additional regex strings applied when filtering
             extracted lines (compiled lazily).
         bad_heading_keywords: Title substrings rejected as section headings.
-        pdf_batch_size: Pages per pymupdf4llm batch when extracting PDFs.
+        pdf_batch_size: PDF page-chunking hint (accepted for backward
+            compatibility; the page-chunked conversion path does not
+            batch pages — every physical page is its own conversion
+            chunk, which is what makes page attribution exact).
         locale: Language for generated catalog/index labels (``en`` or ``zh``).
         search_limit: Max rows returned by FTS/LIKE search.
     """

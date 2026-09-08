@@ -548,6 +548,213 @@ def test_rewrite_tags_follow_new_version(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# SQLite: F03 page provenance (physical pages, unknown for no-pagination)
+# ---------------------------------------------------------------------------
+
+def test_parser_tracks_physical_page_span():
+    """F03: a chunk's page_start/page_end span its first to last line's
+    physical page — no heading-bookmark guessing involved."""
+    lines = [
+        (7, "## 3.1 Power Sequence"),
+        (7, "The rails power up in order."),
+        (8, "A continuation sentence on the next physical page."),
+        (9, "And the tail on a third page."),
+    ]
+    chunks = parse_into_chunks(lines, "manual.pdf")
+    assert len(chunks) == 1
+    c = chunks[0]
+    assert c["page_start"] == 7
+    assert c["page_end"] == 9
+
+
+def test_parser_pages_none_when_extractor_supplies_none():
+    """F03: DOCX/code lines carry page None; chunks must expose None,
+    never a fabricated page 1."""
+    lines = [
+        (None, "## 1. Scope"),
+        (None, "This document defines scope."),
+    ]
+    chunks = parse_into_chunks(lines, "spec.docx")
+    assert chunks
+    for c in chunks:
+        assert c["page_start"] is None
+        assert c["page_end"] is None
+
+
+def test_v6_to_v7_migration_makes_page_start_nullable(tmp_path):
+    """F03 migration: an old schema (page_start NOT NULL, schema_version 6)
+    is upgraded in place — column becomes nullable, page_end appears, and
+    existing rows keep their data and rowids."""
+    from doc_structuring import database
+
+    db_path = tmp_path / "old.db"
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA foreign_keys = ON;")
+    cursor.execute("""
+        CREATE TABLE documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT NOT NULL,
+            upload_time TEXT NOT NULL,
+            chunk_count INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'success'
+        );
+    """)
+    cursor.execute("""
+        CREATE TABLE chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id INTEGER NOT NULL,
+            section_number TEXT NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            page_start INTEGER NOT NULL,
+            file_path TEXT,
+            cross_references TEXT,
+            doc_type TEXT DEFAULT 'spec',
+            symbol_name TEXT,
+            line_start INTEGER,
+            line_end INTEGER,
+            FOREIGN KEY (document_id) REFERENCES documents (id) ON DELETE CASCADE
+        );
+    """)
+    cursor.execute(
+        "INSERT INTO documents (filename, upload_time, chunk_count, status) "
+        "VALUES ('legacy.pdf', '2026-01-01 00:00:00', 1, 'success')"
+    )
+    cursor.execute(
+        "INSERT INTO chunks (document_id, section_number, title, content, "
+        "page_start, file_path) VALUES (1, '1', 'Legacy', 'Legacy content', 5, '')"
+    )
+    cursor.execute(
+        "CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT);"
+    )
+    cursor.execute(
+        "INSERT INTO _meta (key, value) VALUES ('schema_version', '6');"
+    )
+    conn.commit()
+    conn.close()
+
+    # init_db against the old db must run the v6->v7 migration.
+    # AppConfig.db_path resolves to <base_dir>/documents.db, so install
+    # the pre-made legacy db there first.
+    (tmp_path / "documents.db").write_bytes(db_path.read_bytes())
+    config = _make_config(tmp_path)
+    database.init_db(config)
+
+    # nullable now?
+    info = dict(
+        (r[1], r[3])
+        for r in sqlite3.connect(str(config.db_path))
+        .execute("PRAGMA table_info(chunks);")
+        .fetchall()
+    )
+    assert info["page_start"] == 0, "page_start should no longer be NOT NULL"
+    assert "page_end" in info, "page_end column missing after migration"
+    row = sqlite3.connect(str(config.db_path)).execute(
+        "SELECT id, page_start FROM chunks"
+    ).fetchone()
+    assert row == (1, 5), f"legacy row value not preserved: {row}"
+
+    # FTS triggers must exist after the table rebuild (triggers fire
+    # transactionally; the FTS setup re-creates them after init_db returns).
+    trigger_count = sqlite3.connect(str(config.db_path)).execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
+        "AND tbl_name='chunks'"
+    ).fetchone()[0]
+    assert trigger_count >= 2, "FTS triggers missing after rebuild"
+
+
+def test_xml_page_number_unknown_true_for_none():
+    """F03 contract: format_chunk_to_xml emits <page_number unknown="true"/>
+    when the chunk has no page, and a start/end span for cross-page chunks."""
+    from doc_structuring.utils import format_chunk_to_xml
+
+    unknown = format_chunk_to_xml({"chunk": {
+        "section_number": "1", "title": "T", "content": "c",
+        "page_start": None, "page_end": None,
+    }})
+    assert '<page_number unknown="true" />' in unknown
+    assert "<page_number>1</page_number>" not in unknown
+
+    span = format_chunk_to_xml({"chunk": {
+        "section_number": "1", "title": "T", "content": "c",
+        "page_start": 12, "page_end": 14,
+    }})
+    assert '<page_number start="12" end="14" />' in span
+
+    single = format_chunk_to_xml({"chunk": {
+        "section_number": "1", "title": "T", "content": "c",
+        "page_start": 3, "page_end": 3,
+    }})
+    assert "<page_number>3</page_number>" in single
+
+
+def test_save_document_roundtrips_page_span_and_none(tmp_path):
+    """E2E F03: page spans survive save_document; None pages stay None
+    (not coerced to 1) and come back through get_document_toc / search."""
+    from doc_structuring import database
+
+    config = _make_config(tmp_path)
+    doc_id = database.save_document(
+        "pages.pdf",
+        [
+            {"number": "1", "title": "First", "content": "Alpha content.",
+             "page_start": 2, "page_end": 4, "source": "pages.pdf"},
+            {"number": "2", "title": "Second", "content": "Beta content.",
+             "page_start": None, "page_end": None, "source": "pages.pdf"},
+        ],
+        config=config,
+    )
+    assert doc_id is not None
+    rows = database.get_document_toc(doc_id, config=config)
+    by_num = {r["section_number"]: r for r in rows}
+    assert by_num["1"]["page_start"] == 2
+    assert by_num["1"]["page_end"] == 4
+    assert by_num["2"]["page_start"] is None
+    assert by_num["2"]["page_end"] is None
+
+
+def test_docx_extractor_emits_unknown_page(tmp_path):
+    """F03: the DOCX extractor must emit page None (not a fake 1), and that
+    None must survive parse_into_chunks and save_document.  DOCX has no
+    reliable page map, so any page number it invents poisons the XML
+    grounding contract."""
+    from docx import Document
+    from doc_structuring import database
+    from doc_structuring.extractors.docx import DocxExtractor
+    from doc_structuring.parser import parse_into_chunks
+
+    docx_path = tmp_path / "mini.docx"
+    d = Document()
+    d.add_heading("1. Scope", level=1)
+    d.add_paragraph("This document defines the scope of the controller.")
+    d.add_heading("2. Flash", level=1)
+    d.add_paragraph("Commands go over EC port 80h.")
+    d.save(str(docx_path))
+
+    lines = DocxExtractor().extract_lines(str(docx_path), temp_dir=str(tmp_path))
+    assert lines, "extractor produced no lines"
+    fabricated = [page for page, _line in lines if page is not None]
+    assert not fabricated, f"DOCX lines carry fabricated pages: {fabricated}"
+
+    chunks = parse_into_chunks(lines, "mini.docx")
+    assert chunks, "parser produced no chunks"
+    for c in chunks:
+        assert c["page_start"] is None, f"chunk {c['number']} got a page"
+        assert c["page_end"] is None
+
+    config = _make_config(tmp_path)
+    doc_id = database.save_document("mini.docx", chunks, config=config)
+    assert doc_id is not None
+    bad = [
+        (r["section_number"], r["page_start"])
+        for r in database.get_document_toc(doc_id, config=config)
+        if r["page_start"] is not None
+    ]
+    assert not bad, f"DOCX chunks stored with pages: {bad}"
+
+
+# ---------------------------------------------------------------------------
 # version consistency
 # ---------------------------------------------------------------------------
 

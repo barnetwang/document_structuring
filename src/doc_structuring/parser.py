@@ -379,7 +379,13 @@ def parse_into_chunks(
     """Split extracted lines into structured section chunks.
 
     Each returned dict contains the keys ``number``, ``title``,
-    ``content``, ``page_start``, and ``source``.
+    ``content``, ``page_start``, ``page_end``, and ``source``.
+
+    Page provenance (finding F03): for line-sourced documents the
+    extractor supplies physical page numbers and ``page_start`` /
+    ``page_end`` span the chunk's first to last physical page.  For
+    documents without reliable pagination (DOCX, source code) both
+    keys are ``None`` — never a fabricated "page 1".
     """
     chunks: list[dict] = []
 
@@ -387,7 +393,8 @@ def parse_into_chunks(
         "number": "0",
         "title": "Introduction",
         "content": [],
-        "page_start": 1,
+        "page_start": None,
+        "page_end": None,
     }
 
     tracker = SectionNumberTracker()
@@ -431,6 +438,7 @@ def parse_into_chunks(
                     "title": current["title"],
                     "content": chunk_text,
                     "page_start": current["page_start"],
+                    "page_end": current["page_end"],
                     "source": source_file,
                     "cross_references": extract_cross_references(chunk_text),
                 })
@@ -440,10 +448,16 @@ def parse_into_chunks(
                 "title": title,
                 "content": [],
                 "page_start": page_num,
+                "page_end": page_num,
             }
             continue
 
         current["content"].append(line)
+        if page_num is not None:
+            if current["page_start"] is None:
+                current["page_start"] = page_num
+            if current["page_end"] is None or page_num > current["page_end"]:
+                current["page_end"] = page_num
 
     final_chunk_text = "\n".join(current["content"]).strip()
     chunks.append({
@@ -451,6 +465,7 @@ def parse_into_chunks(
         "title": current["title"],
         "content": final_chunk_text,
         "page_start": current["page_start"],
+        "page_end": current["page_end"],
         "source": source_file,
         "cross_references": extract_cross_references(final_chunk_text),
     })
