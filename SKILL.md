@@ -1,7 +1,7 @@
 ---
 name: doc-str
 description: "Use when parsing/searching hardware/firmware spec docs (PDF/DOCX), C/H source, or EDK2 build configs: registers, GUIDs, error codes, C symbols, section lookup, spec-to-code evidence. Not a compiler or build resolver."
-version: 0.1.5
+version: 0.1.6
 author: Barnet Wang
 license: Apache-2.0
 ---
@@ -66,6 +66,13 @@ doc-str embed --doc-id <id> --output <temp_embed.json>
 ```
 `parse-code` **appends** (fresh document each run) — delete the old code document before re-ingesting if you want a clean replace. `embed` recomputes every chunk in scope with no staleness check; re-run it after any re-parse of an embedded document.
 
+**Post-ingest verification is mandatory** (project-memory tickets #12/#13 — 2026-09-08, doc-str 0.1.x): `parse` exits 0 even when the document ingested as garbage. After EVERY parse (especially >500-page, merged-volume, or figure-dense PDFs, and any PDF with `get_toc()==0` bookmarks), verify:
+1. `chunk_count` vs page count — density collapse (e.g. 3347 p → 66 chunks while a 392-p volume yields 49) is a red flag; inspect max chunk size (multi-MB single chunks = segmentation collapse).
+2. Spot-read 2–3 chunk bodies (title + mid-chunk) for real text.
+3. `SELECT COUNT(*) FROM chunks WHERE content LIKE '%GRAPHICANCHOR%'` on the DB — nonzero = residual anchors leaking into searchable text (see Known Limitations).
+4. Garbled signature: chunk body that is mostly `G C C O eyJ0 …`-style base64-of-JSON blob with interleaved spaces = whole document collapsed to a single anchor-debris chunk (TOC also destroyed — every section shows the first chapter title). Raw PDF reading via PyMuPDF is usually clean in that case, so the fault is the extractor, not the file. Tag such documents `garbled` and report, do not present them as ingested.
+5. Watermark signature: `SELECT COUNT(*) FROM chunks WHERE content LIKE '%NVIDIA CONFIDENTIAL%' OR content LIKE '%GIGABYTE -%'` (extend the pattern to the vendor's own watermark string). Nonzero = the PDF carries a tiled watermark text layer that the standard extractor baked into every chunk. NVIDIA N1x templates do this (16/18 files collapsed to mega-chunks + every chunk watermarked, 2026-09-09). Remediation: char-level span filter (drop Helvetica*/size≤5.5/watermark-signature spans) before line rebuild — working pipeline: `D:/tools/doc_str_helpers/rebuild_watermarked_n1x.py`.
+
 ## Known Limitations (fixed: F01/F02 in 0.1.3, F07 in 0.1.4, F03 in 0.1.5, F04 in 0.1.6 — 2026-09-08)
 
 - **Query scope** (fixed in 0.1.6): `search` accepts `--tags a,b` (AND semantics, case-insensitive) to restrict results to documents carrying ALL of the listed tags — applied to BOTH the FTS leg and the vector candidate set, so RRF fusion cannot reintroduce out-of-scope chunks. A tag list matching no document yields zero results (fail closed). Without `--tags`, search spans the whole database.
@@ -75,6 +82,8 @@ doc-str embed --doc-id <id> --output <temp_embed.json>
 - **Re-parse is atomic** (fixed in 0.1.4): `save_document` now inserts the new version, writes all its files, backfills paths, and only then removes the old rows + commits as one transaction. A failed re-parse rolls back — the previous version (rows, FTS, files) stays fully intact. The new version's partial tree is removed. Post-commit maintenance (old tree, scratch dirs, index/catalog) best-effort: failures there leave stale artifacts but never corrupt committed data. Ingestion remains serial per base-dir — the write lock is held during file I/O.
 - **Page location** (fixed in 0.1.5): PDF `page_start`/`page_end` are **exact physical pages** — the converter now emits one markdown chunk per physical page, so no heading/bookmark matching is involved; a `page_end > page_start` span means the section crosses pages. DOCX and source-code chunks have `page_start = NULL` (unknown) — cite sections/paragraphs instead of inventing a page.
 - **PDF tables**: the advertised borderless-table fallback is not yet wired into the pipeline — coverage depends on the built-in converter alone.
+- **GRAPHICANCHOR residue & interleaving** (known defect, project-memory #12, 2026-09-08): the extractor redacts figure regions and inserts `GRAPHICANCHOR<b64>ENDANCHOR` markers at a fixed point; when page text shares the anchor's text line, extraction interleaves page characters into the marker and the replacement regex fails → residual `GRAPHICANCHOR…` text lands inside searchable chunks (observed in up to 54% of docs, worst 85 chunks in one 271-p doc), and in extreme PDFs (e.g. 68318, FL1 DragonRange guide) the whole document collapses into one 8.6KB garbled chunk. Check `chunks.content LIKE '%GRAPHICANCHOR%'` after ingest; search hits may carry marker debris — strip it when reading content.
+- **Tiled watermark layer** (known defect, sibling of #12, observed 2026-09-09 on NVIDIA N1x batch): vendor PDF templates can embed a per-page tiled watermark text layer ("VENDOR - CONFIDENTIAL <ts> <uuid>", ~17k tiny chars/page) that the standard extractor keeps as content. Two failure modes: (a) every ingested chunk carries watermark residue (pollutes search + leaks "confidential" headers); (b) the ~17k noise chars per page make the line/section splitter collapse the whole document into a single mega-chunk. The standard `parse` has **no watermark filter** — detect via the post-ingest LIKE audit (rule 4 step 5) and rebuild via the char-level filter pipeline (`D:/tools/doc_str_helpers/rebuild_watermarked_n1x.py`). Also note the same batch exposed two printed-TOC parser traps: the NVIDIA template glues the chapter title to its dot (`Chapter 2.Power-On` → a `.?` separator in the title-strip regex eats the title's first char — use `\s*`), and front-matter version tables (`1.0 October 17, 2024 …`) match the section-number regex — gate TOC lines on the presence of a dot-leader + page number.
 - **C/H coverage**: symbols declared inside `#if` / header-guard blocks and function-like macros are missed; comment attachment is inconsistent.
 - **DOCX tables**: `|` inside cell text is escaped oddly; consecutive identical rows are silently deduplicated. Verify critical table data (bit expressions, compliance rows) against the original file.
 - **Empty input can still succeed**: a file with no extractable evidence may return success — check `chunk_count` and TOC sanity before trusting.
